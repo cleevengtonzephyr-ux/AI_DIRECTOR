@@ -1,4 +1,5 @@
-﻿from pathlib import Path
+﻿import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, List
 import json
@@ -720,4 +721,14 @@ def main():
 
 
 if __name__ == "__main__":
+
+    # Correctif encodage console (Windows/PowerShell, codepages non-UTF-8) :
+    # les messages du pipeline contiennent des caractères Unicode (✅, 🛑, ⚠️)
+    # que certains codepages (ex. cp1252) ne peuvent pas encoder, ce qui fait
+    # planter print() avec UnicodeEncodeError. On force stdout/stderr en UTF-8
+    # uniquement lors d'une exécution directe du script.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     main()

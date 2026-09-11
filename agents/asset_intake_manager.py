@@ -1,4 +1,5 @@
 ﻿import json
+import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List
@@ -6,6 +7,11 @@ from typing import Dict, List
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = PROJECT_ROOT / "assets" / "zephyr"
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from agents.asset_catalog import ASSET_CATALOG
 
 
 @dataclass
@@ -31,32 +37,9 @@ class AssetIntakeManager:
     - Ne lancer aucune génération.
     """
 
-    CATEGORIES = {
-        "avatar": {
-            "required": True,
-            "extensions": {".png", ".jpg", ".jpeg", ".webp"},
-        },
-        "references": {
-            "required": True,
-            "extensions": {".png", ".jpg", ".jpeg", ".webp"},
-        },
-        "audio": {
-            "required": True,
-            "extensions": {".wav", ".mp3", ".m4a", ".aac"},
-        },
-        "prompts": {
-            "required": True,
-            "extensions": {".txt", ".md", ".json"},
-        },
-        "music": {
-            "required": False,
-            "extensions": {".wav", ".mp3", ".m4a", ".aac"},
-        },
-        "logo": {
-            "required": False,
-            "extensions": {".png", ".jpg", ".jpeg", ".webp", ".svg"},
-        },
-    }
+    # Règles de catégorie déléguées au catalogue unique (agents/asset_catalog.py)
+    # afin d'éviter la duplication avec AssetPreparationSystem/AssetManager.
+    CATEGORIES = ASSET_CATALOG
 
     def __init__(self, asset_root: Path):
         self.asset_root = asset_root

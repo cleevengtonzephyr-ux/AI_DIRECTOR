@@ -3,6 +3,15 @@ from dataclasses import dataclass, asdict
 from typing import List, Dict
 import json
 import hashlib
+import sys
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from agents.asset_catalog import ASSET_CATALOG
 
 
 @dataclass
@@ -31,44 +40,10 @@ class AssetPreparationSystem:
     - Ne jamais générer de média.
     """
 
-    RULES = {
-        "avatar": {
-            "required": True,
-            "extensions": [".png", ".jpg", ".jpeg", ".webp"],
-            "role": "master_avatar",
-        },
-        "references": {
-            "required": True,
-            "extensions": [".png", ".jpg", ".jpeg", ".webp"],
-            "role": "face_reference",
-        },
-        "audio": {
-            "required": True,
-            "extensions": [".wav", ".mp3", ".m4a", ".aac"],
-            "role": "main_voice",
-        },
-        "prompts": {
-            "required": True,
-            "extensions": [".txt", ".md", ".json"],
-            "role": "production_prompts",
-        },
-        "music": {
-            "required": False,
-            "extensions": [".wav", ".mp3", ".m4a", ".aac"],
-            "role": "background_music",
-        },
-        "logo": {
-            "required": False,
-            "extensions": [
-                ".png",
-                ".jpg",
-                ".jpeg",
-                ".webp",
-                ".svg",
-            ],
-            "role": "brand_logo",
-        },
-    }
+    # Règles de catégorie déléguées au catalogue unique (agents/asset_catalog.py)
+    # — AssetPreparationSystem reste la référence pour la préparation/validation,
+    # mais ne duplique plus la table des catégories/extensions/rôles.
+    RULES = ASSET_CATALOG
 
     def __init__(self, project_root: Path):
 

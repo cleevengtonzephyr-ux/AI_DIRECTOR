@@ -1,31 +1,39 @@
 {
   "system": "AI DIRECTOR",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "video_id": "005",
   "mode": "DRY-RUN",
   "higgsfield_called": false,
+  "generation_performed": false,
   "credits_spent": 0,
+  "master_prompt_assembled": true,
   "events": [
     {
-      "timestamp": "2026-09-10T19:22:43.488460",
+      "timestamp": "2026-09-11T15:33:31.065054",
       "stage": "PLAN_VALIDATION",
       "status": "PASS",
       "message": "6 scenes validated."
     },
     {
-      "timestamp": "2026-09-10T19:22:43.489616",
+      "timestamp": "2026-09-11T15:33:31.065637",
       "stage": "ASSET_INTAKE",
       "status": "PASS",
       "message": "6 assets detected."
     },
     {
-      "timestamp": "2026-09-10T19:22:43.496349",
+      "timestamp": "2026-09-11T15:33:31.071074",
       "stage": "ASSET_PREPARATION",
       "status": "PASS",
       "message": "6 assets prepared."
     },
     {
-      "timestamp": "2026-09-10T19:22:45.566029",
+      "timestamp": "2026-09-11T15:33:31.071611",
+      "stage": "PROMPT_ASSEMBLY",
+      "status": "PASS",
+      "message": "Master Prompt assembled from character identity, visual style and video-specific direction."
+    },
+    {
+      "timestamp": "2026-09-11T15:33:33.815427",
       "stage": "PRODUCTION_GATE",
       "status": "BLOCKED",
       "message": "Budget: Insufficient credits: 1.41 available < 32.5 required."
