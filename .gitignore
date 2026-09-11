@@ -1,0 +1,59 @@
+# =========================================
+# AI DIRECTOR — .gitignore
+# =========================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# --- Secrets / credentials / API keys ---
+.env
+.env.*
+!.env.example
+*.env
+secrets.json
+credentials.json
+credentials/
+*.key
+*.pem
+*.p12
+*.pfx
+*_token.*
+*.token
+api_keys.json
+config/secrets*
+config/*.local.json
+
+# --- Windows ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# --- IDE / editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS misc ---
+.DS_Store

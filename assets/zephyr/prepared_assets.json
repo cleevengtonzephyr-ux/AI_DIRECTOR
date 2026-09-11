@@ -1,0 +1,78 @@
+{
+  "system": "AI DIRECTOR — Asset Preparation System",
+  "version": "0.1",
+  "project": "ZEPHYR AI",
+  "status": "READY",
+  "assets": [
+    {
+      "category": "avatar",
+      "filename": "avatar_master.png",
+      "path": "C:\\Users\\omnia\\AI_DIRECTOR\\assets\\zephyr\\avatar\\avatar_master.png",
+      "extension": ".png",
+      "size_bytes": 658262,
+      "sha256": "d293e41a63f66fd43afbebee3f7f9f1bd29143b465fa57a18ab4e1df5faf7280",
+      "status": "READY",
+      "role": "master_avatar"
+    },
+    {
+      "category": "references",
+      "filename": "mon avatar habille.png",
+      "path": "C:\\Users\\omnia\\AI_DIRECTOR\\assets\\zephyr\\references\\mon avatar habille.png",
+      "extension": ".png",
+      "size_bytes": 1812286,
+      "sha256": "df83a97b71cff9a90191c19d15ff989228b9fef2e57c96cf7c76c68652e3a343",
+      "status": "READY",
+      "role": "face_reference"
+    },
+    {
+      "category": "audio",
+      "filename": "voice_main.wav.wav",
+      "path": "C:\\Users\\omnia\\AI_DIRECTOR\\assets\\zephyr\\audio\\voice_main.wav.wav",
+      "extension": ".wav",
+      "size_bytes": 556844,
+      "sha256": "2c97d24434c7e37a3d30810a6137cdaf1ef95b3420ee37a28720d37fdff288b9",
+      "status": "READY",
+      "role": "main_voice"
+    },
+    {
+      "category": "prompts",
+      "filename": "character_identity.md",
+      "path": "C:\\Users\\omnia\\AI_DIRECTOR\\assets\\zephyr\\prompts\\character_identity.md",
+      "extension": ".md",
+      "size_bytes": 1653,
+      "sha256": "18f6c8ad9c503732e056018a22d99d692a4c2947278e1527f381f2b1c0932943",
+      "status": "READY",
+      "role": "production_prompts"
+    },
+    {
+      "category": "prompts",
+      "filename": "video_005.md",
+      "path": "C:\\Users\\omnia\\AI_DIRECTOR\\assets\\zephyr\\prompts\\video_005.md",
+      "extension": ".md",
+      "size_bytes": 2687,
+      "sha256": "1da5488fa710e76cbc0ff260f36862d71f0fae7362548f54bbff1361783989b2",
+      "status": "READY",
+      "role": "production_prompts"
+    },
+    {
+      "category": "prompts",
+      "filename": "visual_style.md",
+      "path": "C:\\Users\\omnia\\AI_DIRECTOR\\assets\\zephyr\\prompts\\visual_style.md",
+      "extension": ".md",
+      "size_bytes": 1900,
+      "sha256": "b0922e9a016a7f4a9d5e03aaaca961d998022619846655cd04490f9852c8da7c",
+      "status": "READY",
+      "role": "production_prompts"
+    }
+  ],
+  "validation": {
+    "status": "READY",
+    "errors": [],
+    "warnings": [
+      "Multiple valid files found in 'prompts'. Primary selection required."
+    ]
+  },
+  "higgsfield_called": false,
+  "generation_performed": false,
+  "credits_spent": 0
+}
