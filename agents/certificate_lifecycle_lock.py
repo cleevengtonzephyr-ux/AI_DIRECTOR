@@ -83,6 +83,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+# P3.97 D1: bounded retry of the lock-file delete on release (see acquire()).
+_RELEASE_RETRY_SECONDS = 1.0
+_RELEASE_RETRY_INTERVAL_SECONDS = 0.005
+
+
 class CertificateLifecycleLockBusyError(RuntimeError):
     """
     Raised when the Certificate Lifecycle lock cannot be acquired
@@ -122,7 +127,10 @@ class CertificateLifecycleFileLock:
         while fd is None:
             try:
                 fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            except FileExistsError as error:
+            except (FileExistsError, PermissionError) as error:
+                # PermissionError (P3.97 D2): Windows refuses the exclusive
+                # create while a concurrent holder's lock file is still being
+                # deleted -- the lock is busy, not a distinct failure.
                 if time.monotonic() >= deadline:
                     raise CertificateLifecycleLockBusyError(
                         f"Certificate lifecycle lock '{self.lock_path}' is already held "
@@ -138,13 +146,25 @@ class CertificateLifecycleFileLock:
             try:
                 os.close(fd)
             finally:
-                try:
-                    self.lock_path.unlink()
-                except OSError:
-                    # Already gone (e.g. removed manually while held) --
-                    # nothing more to do; never masks an exception raised
-                    # inside the `with` block, which propagates normally.
-                    pass
+                release_deadline = time.monotonic() + _RELEASE_RETRY_SECONDS
+                while True:
+                    try:
+                        self.lock_path.unlink()
+                    except PermissionError:
+                        # P3.97 D1: on Windows a waiter briefly reading the
+                        # lock file (`_diagnostic_summary()`) makes the delete
+                        # fail; giving up at once orphaned a lock that was
+                        # released cleanly. Retry, bounded -- still never
+                        # masks an exception raised inside the `with` block.
+                        if time.monotonic() < release_deadline:
+                            time.sleep(_RELEASE_RETRY_INTERVAL_SECONDS)
+                            continue
+                    except OSError:
+                        # Already gone (e.g. removed manually while held) --
+                        # nothing more to do; never masks an exception raised
+                        # inside the `with` block, which propagates normally.
+                        pass
+                    break
 
     @staticmethod
     def _write_diagnostics(fd: int) -> None:

@@ -181,7 +181,12 @@ def _worker(mode, sandbox, *args):
                         store.mark_executed(request_id, job_id=f"{prefix}-{request_id}")
                     ok.append(request_id)
                     if forever == "1":
-                        (sandbox / f"ok-{wid}-{len(ok)}").write_text(request_id)
+                        # P3.97 : marqueur atomique -- un `write_text()` direct
+                        # tué entre création et écriture laissait un `ok-*`
+                        # vide, lu comme id '' par l'oracle de test_c6.
+                        tmp = sandbox / f".tmp-ok-{wid}-{len(ok)}"
+                        tmp.write_text(request_id)
+                        os.replace(tmp, sandbox / f"ok-{wid}-{len(ok)}")
                 except CriticalSectionBusyError:
                     busy += 1
                 except Exception as error:
