@@ -54,7 +54,11 @@ class VideoPlanner:
         title: str,
         hook: str,
         objective: str,
-        duration: int = 40,
+        # 15s = plafond réel confirmé en lecture seule pour seedance_2_0
+        # (Phase P1.2-bis, `generate cost` réel : 5/10/15 acceptés, >15
+        # rejeté par l'API : "duration: Input should be less than or
+        # equal to 15"). Valeur unique, centralisée ici.
+        duration: int = 15,
     ) -> VideoPlan:
 
         scenes = [
@@ -289,7 +293,6 @@ def main():
             "pourquoi la discipline répétée produit des résultats "
             "supérieurs au talent seul."
         ),
-        duration=40,
     )
 
     print("\n[2] Validating production plan...")

@@ -57,3 +57,6 @@ $RECYCLE.BIN/
 
 # --- OS misc ---
 .DS_Store
+
+# --- Runtime state (replay guard, critical-section locks) ---
+state/

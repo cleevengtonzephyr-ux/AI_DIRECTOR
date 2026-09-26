@@ -1,5 +1,5 @@
 ﻿"""
-AI DIRECTOR — COST ENGINE v0.6
+AI DIRECTOR — COST ENGINE v0.7
 
 Responsibility:
 - Verify Higgsfield account balance.
@@ -8,6 +8,24 @@ Responsibility:
 - Block production when budget is insufficient.
 - NEVER create a generation job.
 - NEVER spend credits.
+
+RÔLE (Phase P2.2 — IMPORTANT) :
+CostEngine reste un contrôle de coût V1 utilisé par ProductionGate pour
+son propre dry-run (agents/production_gate.py, agents/pipeline_orchestrator.py) —
+il n'a jamais lancé de génération et continue à ne jamais le faire.
+Avant P2.2, `evaluate_plan()` interrogeait par erreur `plan.workflow`
+(un identifiant de WORKFLOW V1, ex. "cinematic_studio_video_4_0",
+agents/planner.py) comme s'il s'agissait du modèle réel de production,
+ce qui produisait un coût pour un modèle DIFFÉRENT de celui utilisé en
+génération. `evaluate_plan()` interroge désormais PRODUCTION_MODEL
+(agents/production_model.py, "seedance_2_0") — la même source unique
+que VideoAgent et GenerationApprovalGate.
+
+Ce contrôle reste néanmoins informatif/dry-run : la seule autorité pour
+une décision de production réelle est la chaîne V2 (VideoAgent ->
+GenerationCostService -> GenerationApprovalGate -> GenerationJobService
+-> QualityEvaluator -> FinalReportService). CostEngine/ProductionGate
+ne créent et n'autorisent jamais un job réel.
 """
 
 import sys
@@ -31,6 +49,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # ============================================================
 
 from integrations.higgsfield.client import HiggsfieldClient
+from agents.production_model import PRODUCTION_MODEL
 
 
 # ============================================================
@@ -55,7 +74,7 @@ class CostEstimate:
 
 class CostEngine:
 
-    VERSION = "0.6"
+    VERSION = "0.7"
 
     def __init__(self):
         self.higgsfield = HiggsfieldClient()
@@ -275,7 +294,10 @@ class CostEngine:
         """
         Evaluate a VideoPlan using the official Master Prompt.
 
-        The prompt MUST come from PromptAssemblySystem.
+        The prompt MUST come from PromptAssemblySystem. The cost is
+        always checked against PRODUCTION_MODEL (Phase P2.2) — never
+        against `plan.workflow`, which identifies a V1 workflow, not
+        the real production model.
         """
 
         duration = int(
@@ -284,12 +306,6 @@ class CostEngine:
                 "duration",
                 0,
             )
-        )
-
-        workflow = getattr(
-            plan,
-            "workflow",
-            "",
         )
 
         scenes = getattr(
@@ -322,7 +338,7 @@ class CostEngine:
         if prompt is None or not prompt.strip():
 
             return CostEstimate(
-                target=workflow,
+                target=PRODUCTION_MODEL,
                 duration=duration,
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
@@ -337,10 +353,14 @@ class CostEngine:
 
         # ----------------------------------------------------
         # FINAL COST CHECK
+        #
+        # Interroge PRODUCTION_MODEL (Phase P2.2), jamais
+        # plan.workflow (identifiant de WORKFLOW V1, sans rapport
+        # avec le modèle réellement utilisé en génération).
         # ----------------------------------------------------
 
         return self.estimate(
-            target=workflow,
+            target=PRODUCTION_MODEL,
             prompt=prompt,
             duration=duration,
             resolution=resolution,
@@ -378,7 +398,6 @@ def main():
                 "Montrer que la discipline répétée produit des résultats "
                 "supérieurs au talent seul."
             ),
-            duration=40,
         )
 
         assembler = PromptAssemblySystem(PROJECT_ROOT)

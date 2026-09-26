@@ -26,16 +26,21 @@ class ProductionGate:
     """
     AI DIRECTOR — Production Gate v0.3
 
-    Verrou central avant toute production.
+    Verrou de dry-run V1 avant production (préparation/diagnostic).
 
     Conditions :
     1. Le plan doit être valide.
     2. Le Master Prompt doit être présent.
-    3. Le coût réel Higgsfield doit être vérifié.
+    3. Le coût réel Higgsfield doit être vérifié (via CostEngine,
+       aligné depuis Phase P2.2 sur PRODUCTION_MODEL, jamais sur
+       `plan.workflow`).
     4. Le budget doit être suffisant.
     5. Les assets obligatoires doivent être présents.
 
-    Cette version ne lance aucune génération.
+    Cette version ne lance aucune génération. RÔLE (Phase P2.2) : ce
+    Gate reste informatif/dry-run — la seule autorité pour une
+    décision de production réelle est la chaîne V2
+    (GenerationApprovalGate, agents/generation_approval_gate.py).
     """
 
     VERSION = "0.3"
@@ -271,7 +276,6 @@ def main():
             "des résultats supérieurs "
             "au talent seul."
         ),
-        duration=40,
     )
 
     assembler = PromptAssemblySystem(

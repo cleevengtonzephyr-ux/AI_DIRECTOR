@@ -8,12 +8,14 @@ from datetime import datetime
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from planner import VideoPlanner
-from asset_intake_manager import AssetIntakeManager
-from asset_preparation_system import AssetPreparationSystem
-from prompt_assembly_system import PromptAssemblySystem
-from production_gate import ProductionGate
+from agents.planner import VideoPlanner
+from agents.asset_intake_manager import AssetIntakeManager
+from agents.asset_preparation_system import AssetPreparationSystem
+from agents.prompt_assembly_system import PromptAssemblySystem
+from agents.production_gate import ProductionGate
 
 
 @dataclass
@@ -704,7 +706,6 @@ def main():
             "la discipline répétée produit des "
             "résultats supérieurs au talent seul."
         ),
-        duration=40,
     )
 
     orchestrator = PipelineOrchestrator(
