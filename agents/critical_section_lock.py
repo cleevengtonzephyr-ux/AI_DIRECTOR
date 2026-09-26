@@ -54,8 +54,14 @@ explicitement un `FileCriticalSectionLock`.
 """
 
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
+
+# Phase P3.98 (D4b) : nouvel essai borné de la suppression du verrou à la
+# libération (cf. `FileCriticalSectionLock.acquire()`).
+_RELEASE_RETRY_SECONDS = 1.0
+_RELEASE_RETRY_INTERVAL_SECONDS = 0.005
 
 
 class CriticalSectionBusyError(RuntimeError):
@@ -104,6 +110,18 @@ class FileCriticalSectionLock:
                 f"proceed (fail-closed). Another execution may currently "
                 f"be in progress for this exact request."
             ) from error
+        except PermissionError as error:
+            # Phase P3.98 (D4a) : sous Windows, la création exclusive est
+            # refusée pendant la suppression du verrou d'un détenteur
+            # concurrent. Même issue que ci-dessus -- refus immédiat, sans
+            # attente, avant toute évaluation et tout create_job() ; une
+            # vraie erreur d'ACL est refusée de la même façon (fail closed),
+            # la cause d'origine restant chaînée.
+            raise CriticalSectionBusyError(
+                f"Critical section for request '{request_id}' could not be "
+                f"acquired (lock file '{lock_path}' refused: {error}) -- "
+                f"refusing to proceed (fail-closed)."
+            ) from error
 
         try:
             yield
@@ -111,12 +129,24 @@ class FileCriticalSectionLock:
             try:
                 os.close(fd)
             finally:
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    # Le verrou est déjà "perdu" (ex. supprimé
-                    # manuellement pendant qu'il était détenu) --
-                    # rien de plus à faire ici ; ne masque jamais une
-                    # exception survenue DANS le bloc `with` (celle-ci
-                    # se propage normalement via ce `finally`).
-                    pass
+                release_deadline = time.monotonic() + _RELEASE_RETRY_SECONDS
+                while True:
+                    try:
+                        lock_path.unlink()
+                    except PermissionError:
+                        # Phase P3.98 (D4b) : sous Windows, un handle
+                        # externe ouvert sur le verrou fait échouer la
+                        # suppression ; abandonner aussitôt laissait
+                        # orphelin un verrou libéré proprement. Nouvel
+                        # essai, borné -- ensuite comportement inchangé.
+                        if time.monotonic() < release_deadline:
+                            time.sleep(_RELEASE_RETRY_INTERVAL_SECONDS)
+                            continue
+                    except OSError:
+                        # Le verrou est déjà "perdu" (ex. supprimé
+                        # manuellement pendant qu'il était détenu) --
+                        # rien de plus à faire ici ; ne masque jamais une
+                        # exception survenue DANS le bloc `with` (celle-ci
+                        # se propage normalement via ce `finally`).
+                        pass
+                    break

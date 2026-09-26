@@ -129,6 +129,11 @@ from typing import Any, Dict, Iterator, Optional, Set
 
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 
+# Phase P3.98 (D3) : nouvel essai borné de la suppression du verrou à la
+# libération (cf. `FileExecutedRequestStore._locked()`).
+_LOCK_RELEASE_RETRY_SECONDS = 1.0
+_LOCK_RELEASE_RETRY_INTERVAL_SECONDS = 0.005
+
 
 class ExecutedRequestStoreCorruptedError(RuntimeError):
     """
@@ -325,10 +330,23 @@ class FileExecutedRequestStore:
                 os.close(fd)
             yield
         finally:
-            try:
-                self.lock_path.unlink()
-            except OSError:
-                pass
+            release_deadline = time.monotonic() + _LOCK_RELEASE_RETRY_SECONDS
+            while True:
+                try:
+                    self.lock_path.unlink()
+                except PermissionError:
+                    # Phase P3.98 (D3) : sous Windows, un lecteur du verrou
+                    # (`_lock_holder()` d'un autre processus) fait échouer
+                    # la suppression ; abandonner aussitôt laissait orphelin
+                    # un verrou libéré proprement. Nouvel essai, borné --
+                    # ensuite comportement inchangé (verrou laissé : fail
+                    # closed, jamais supprimé automatiquement ailleurs).
+                    if time.monotonic() < release_deadline:
+                        time.sleep(_LOCK_RELEASE_RETRY_INTERVAL_SECONDS)
+                        continue
+                except OSError:
+                    pass
+                break
 
     def _lock_holder(self) -> str:
         try:
