@@ -213,6 +213,11 @@ class _FileFacts:
     # defined here), resolved against the authority core in `analyze()`.
     method_value_refs: Tuple[Tuple[str, int], ...] = ()
     symbol_value_refs: Tuple[Tuple[str, int], ...] = ()
+    # P3.101 (P3.81 restoration): the subset of `import_modules` imported as
+    # MODULES (`import X`, `from pkg import module`) -- a module import
+    # exposes that module's whole namespace; a symbol import
+    # (`from M import Name`) only exposes `Name` (P3.77-R1 G3).
+    module_imports: Tuple[Tuple[str, int], ...] = ()
 
 
 def _package_parts(relative_path: str) -> List[str]:
@@ -361,6 +366,7 @@ def _extract_file_facts(
     tree = ast.parse(source, filename=relative_path)
 
     import_modules: List[Tuple[str, int]] = []
+    module_imports: List[Tuple[str, int]] = []
     calls: List[Tuple[str, int]] = []
     class_defs: List[Tuple[str, int]] = []
     function_defs: List[Tuple[str, int]] = []
@@ -390,6 +396,7 @@ def _extract_file_facts(
         if isinstance(node, ast.Import):
             for alias in node.names:
                 import_modules.append((alias.name, node.lineno))
+                module_imports.append((alias.name, node.lineno))
             local_bindings.update(_import_bindings(relative_path, node))
         elif isinstance(node, ast.ImportFrom):
             # P3.76-R1: relative forms resolved to their absolute module
@@ -407,6 +414,7 @@ def _extract_file_facts(
                     candidate = f"{module}.{alias.name}"
                     if candidate in known_modules:
                         import_modules.append((candidate, node.lineno))
+                        module_imports.append((candidate, node.lineno))
                     else:
                         symbol_refs.append((candidate, node.lineno))
                 local_bindings.update(_import_bindings(relative_path, node))
@@ -529,6 +537,7 @@ def _extract_file_facts(
         run_calls=tuple(run_calls),
         method_value_refs=tuple(method_value_refs),
         symbol_value_refs=tuple(symbol_value_refs),
+        module_imports=tuple(module_imports),
     )
 
 
@@ -933,10 +942,17 @@ class ArchitectureDriftDetector:
             if not has_create_job_calls:
                 continue
 
-            is_relevant = facts.domain == Domain.P2_AUTHORITY_CORE or bool(
-                _has_import_with_prefix(
-                    _with_reexports(facts), sorted(self.contract.create_job_relevance_import_prefixes)
+            is_relevant = (
+                facts.domain == Domain.P2_AUTHORITY_CORE
+                or bool(
+                    _has_import_with_prefix(
+                        _with_reexports(facts), sorted(self.contract.create_job_relevance_import_prefixes)
+                    )
                 )
+                # P3.101 (P3.81): the client reached through the import
+                # closure -- `AIDirector().higgsfield.create_job(...)`,
+                # `gate.provider.client.create_job(...)`, helper chains.
+                or self._import_closure_reaches_create_job_relevance(rel_path, facts_by_file) is not None
             )
 
             if not is_relevant:
@@ -955,8 +971,9 @@ class ArchitectureDriftDetector:
                             evidence=f"call to 'create_job(' found at {rel_path}:{line}",
                             explanation=(
                                 f"'{rel_path}' calls a method named 'create_job' "
-                                "but imports nothing from integrations.higgsfield "
-                                "and is not part of the P2 Authority Core -- "
+                                "but neither it nor its import closure reaches "
+                                "integrations.higgsfield, and it is not part of "
+                                "the P2 Authority Core -- "
                                 "almost certainly an unrelated same-named method "
                                 "(known case: agents/job_monitor.py, a dead-code "
                                 "V1 module). Not counted toward production "
@@ -1017,6 +1034,65 @@ class ArchitectureDriftDetector:
             )
 
         return findings
+
+    # ------------------------------------------------------------------
+    # P3.101 (restores P3.81) -- create_job relevance through the import
+    # closure. The direct check above misses a client reached through the
+    # object graph: `AIDirector().higgsfield` (director.py imports the
+    # client), `gate.provider.client` (the Gate imports the Provider), and
+    # helper/re-export chains leading there. Walks the facts already
+    # extracted -- `module_imports`, `import_modules` and the re-export
+    # provenance resolved by `_resolve_symbol_imports` -- never a new parse.
+    #
+    # Edge kinds (compatible with P3.77-R1 G3): a MODULE import exposes the
+    # whole module, so its closure is followed; a SYMBOL import
+    # (`from M import Name`) is followed only when M -- or the module the
+    # symbol is re-exported from -- is an authority module (P2 Authority
+    # Core or entry point), whose objects carry the provider/client. An
+    # unrelated name taken from a helper that merely imports Higgsfield
+    # stays a namesake. Test files are never walked through. Documented
+    # limit, as in P3.81: a duck-typed call in a file with no such import
+    # (`def go(c): c.create_job(...)`) remains CREATE_JOB_NAMESAKE_UNRELATED.
+    # `_reaches_target_transitively` is not reused: it looks for target
+    # FILES and skips the first hop for the certificate edge rules.
+    # ------------------------------------------------------------------
+
+    def _import_closure_reaches_create_job_relevance(
+        self, rel_path: str, facts_by_file: Dict[str, _FileFacts]
+    ) -> Optional[str]:
+        """Relative path of the first module reached through `rel_path`'s
+        import closure that itself imports a create_job relevance prefix,
+        or `None`. Breadth-first, cycle-safe (`visited`), first-party only."""
+
+        prefixes = sorted(self.contract.create_job_relevance_import_prefixes)
+        authority_files = self.contract.p2_authority_core_files | self.contract.entry_point_files
+
+        def module_file(module: str) -> Optional[str]:
+            base = module.replace(".", "/")
+            for candidate in (base + ".py", base + "/__init__.py"):
+                if candidate in facts_by_file:
+                    return candidate
+            return None
+
+        def next_modules(facts: _FileFacts) -> List[str]:
+            module_edges = {m for m, _line in facts.module_imports}
+            symbol_edges = {m for m, _line in facts.import_modules + facts.reexport_modules} - module_edges
+            return sorted(module_edges) + sorted(m for m in symbol_edges if module_file(m) in authority_files)
+
+        visited = {rel_path}
+        frontier = next_modules(facts_by_file[rel_path])
+        while frontier:
+            path = module_file(frontier.pop(0))
+            if path is None or path in visited:
+                continue
+            visited.add(path)
+            facts = facts_by_file[path]
+            if facts.domain == Domain.TEST:
+                continue
+            if _has_import_with_prefix(_with_reexports(facts), prefixes):
+                return path
+            frontier.extend(next_modules(facts))
+        return None
 
     # ------------------------------------------------------------------
     # G. Signal d'un second noyau d'autorité (heuristique, fichiers non
