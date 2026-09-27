@@ -1,4 +1,5 @@
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -184,6 +185,20 @@ def _default_cli_command() -> Optional[str]:
     return str(Path(appdata) / "npm" / "higgsfield.cmd")
 
 
+def _windows_path_syntax_violation(command: str) -> Optional[str]:
+    """Phase P3.105-STEP-3 -- formes Windows qui échappent aux contrôles par
+    nom/extension (P3.92, `_is_shell_interpreter`) : flux NTFS (`f::$DATA`,
+    `f:flux`, ...) et préfixes `\\\\?\\` / `\\\\.\\` (sans normalisation
+    Win32). Vérifié sur toutes les plateformes, jamais normalisé."""
+
+    normalized = command.replace("/", "\\")
+    if normalized.startswith(("\\\\?\\", "\\\\.\\")):
+        return "Win32 extended/device namespace prefix is not allowed"
+    if ":" in ntpath.splitdrive(normalized)[1]:
+        return "NTFS alternate data stream syntax (':' after the drive) is not allowed"
+    return None
+
+
 def _resolve_cli_command(command: Optional[str]):
     """Retourne `(command, source, error)` ; `command` est None si la
     source retenue est absente ou invalide (jamais de repli)."""
@@ -191,12 +206,22 @@ def _resolve_cli_command(command: Optional[str]):
     if command is not None:
         if not isinstance(command, str) or not command.strip() or "\x00" in command:
             return None, "explicit", f"explicit command {command!r} is empty or invalid"
+        violation = _windows_path_syntax_violation(command)
+        if violation:
+            return None, "explicit", f"explicit command {command!r}: {violation}"
         return command, "explicit", None
 
     configured = os.environ.get(HIGGSFIELD_CLI_ENV_VAR)
     if configured is not None:
-        path = Path(configured) if configured.strip() and "\x00" not in configured else None
-        if path is None or not path.is_absolute() or not path.is_file():
+        violation = (
+            _windows_path_syntax_violation(configured)
+            if configured.strip() and "\x00" not in configured
+            else "empty or invalid"
+        )
+        if violation:
+            return None, "environment", f"{HIGGSFIELD_CLI_ENV_VAR}={configured!r}: {violation}"
+        path = Path(configured)
+        if not path.is_absolute() or not path.is_file():
             return None, "environment", (
                 f"{HIGGSFIELD_CLI_ENV_VAR}={configured!r} must be an absolute "
                 f"path to an existing file"
@@ -209,6 +234,9 @@ def _resolve_cli_command(command: Optional[str]):
             f"no Higgsfield CLI configured: set {HIGGSFIELD_CLI_ENV_VAR} or pass "
             f"command= (no default outside Windows or without %APPDATA%)"
         )
+    violation = _windows_path_syntax_violation(default)
+    if violation:
+        return None, "default", f"default {default!r}: {violation}"
     return default, "default", None
 
 
@@ -364,7 +392,9 @@ class HiggsfieldClient:
         - HiggsfieldCLINotFoundError   si l'exécutable est introuvable.
         - HiggsfieldTimeoutError       si la commande dépasse le délai.
         - HiggsfieldAuthenticationError si le CLI signale un échec d'auth.
-        - HiggsfieldCommandError       pour tout autre exit code != 0.
+        - HiggsfieldCommandError       pour tout autre exit code != 0, ou
+          (P3.105-STEP-3, exit_code=None) si le système refuse de lancer
+          l'exécutable (OSError autre que « introuvable »).
         - HiggsfieldInvalidResponseError si la sortie n'est pas un JSON
           valide alors qu'une sortie était attendue.
         - HiggsfieldRealGenerationDisabledError (Phase P3.83) si
@@ -456,6 +486,17 @@ class HiggsfieldClient:
             raise HiggsfieldTimeoutError(
                 f"Higgsfield CLI command timed out after "
                 f"{effective_timeout}s: {' '.join(args)}"
+            ) from error
+        except OSError as error:
+            # Phase P3.105-STEP-3 : lancement refusé par le système (format
+            # invalide WinError 193, nom invalide WinError 123, accès
+            # refusé...) -- distinct de « introuvable » ci-dessus. Aucun
+            # processus n'a démarré : échec de commande typé, sans code de
+            # sortie, cause d'origine chaînée.
+            raise HiggsfieldCommandError(
+                f"Higgsfield CLI executable could not be launched: "
+                f"{command[0]} ({type(error).__name__}: {error})",
+                exit_code=None,
             ) from error
 
         stdout = (result.stdout or "").strip()

@@ -19,6 +19,7 @@ CLI Higgsfield, aucun réseau, aucun `create_job()`, aucun crédit.
 """
 
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -30,12 +31,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from agents.generation_approval_gate import (
+    GenerationApprovalDecision,
+    GenerationApprovalGate,
+    GenerationRequest,
+    RealGenerationAuthorization,
+)
 from integrations.higgsfield import client as client_mod
 from integrations.higgsfield.client import HIGGSFIELD_CLI_ENV_VAR, HiggsfieldClient
 from integrations.higgsfield.errors import (
+    HiggsfieldAuthenticationError,
     HiggsfieldCLINotFoundError,
+    HiggsfieldCommandError,
+    HiggsfieldInvalidResponseError,
     HiggsfieldRealGenerationDisabledError,
+    HiggsfieldTimeoutError,
 )
+from integrations.higgsfield.provider import HiggsfieldProvider
 
 _FAKE_NPM_SHIM = (
     '@ECHO off\n'
@@ -288,6 +300,194 @@ class TestRuntimeLockUnchanged(_TmpCase):
                 with self.assertRaises(HiggsfieldRealGenerationDisabledError):
                     client.create_job("seedance_2_0", "x", duration=5)
                 mock_run.assert_not_called()
+
+
+# ----------------------------------------------------------------------
+# P3.105-STEP-3 -- flux NTFS / préfixes de namespace, normalisation OSError
+# ----------------------------------------------------------------------
+
+
+def _request(request_id="p3105-step3"):
+    return GenerationRequest(
+        request_id=request_id, job_type="seedance_2_0", prompt="p", duration=5,
+        resolution="720p", aspect_ratio="9:16", approved=True,
+        real_generation_authorization=RealGenerationAuthorization(
+            request_id=request_id, authorized_by_human=True
+        ),
+    )
+
+
+class TestAlternateDataStreamPathsRefused(_TmpCase):
+    def setUp(self):
+        super().setUp()
+        self._npm_layout(self.tmp / "npm")  # défaut valide : jamais un repli
+        self.node_cmd = self.tmp / "node.cmd"
+        self.node_cmd.write_text("@echo FAKE %*\r\n", encoding="ascii")
+        self.comspec = os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe")
+
+    def _ads_variants(self, target: Path):
+        base = str(target)
+        return [
+            base + "::$DATA",
+            base + "::$data",
+            base + ":stream",
+            base + ":stream:$DATA",
+            base.replace("\\", "/") + "::$DATA",
+            str(target.parent) + "::$INDEX_ALLOCATION\\" + target.name,
+            "\\\\?\\" + base,
+            "\\\\.\\" + base,
+            "\\\\?\\" + base + "::$DATA",
+        ]
+
+    def test_precondition_ads_form_is_seen_as_an_existing_file(self):
+        # Le résiduel P3.105 : cette forme passait `is_file()`.
+        self.assertTrue(Path(str(self.plain_cli) + "::$DATA").is_file())
+
+    def test_environment_ads_and_namespace_forms_refused_without_fallback(self):
+        targets = (self.plain_cli, Path(self.comspec), self.node_cmd, self.tmp / "npm" / "higgsfield.cmd")
+        for target in targets:
+            for value in self._ads_variants(target):
+                with self.subTest(value=value):
+                    with _env(**{HIGGSFIELD_CLI_ENV_VAR: value, "APPDATA": str(self.tmp)}):
+                        client = HiggsfieldClient()
+                    self.assertIsNone(client.command)
+                    self.assertEqual(client.command_source, "environment")
+                    self.assertIn("not allowed", client.command_error)
+                    self.assertIsNone(client._direct_invocation)
+                    self.assert_refused_without_process(client, HiggsfieldCLINotFoundError)
+
+    def test_explicit_ads_forms_refused_including_cmd_and_node_cmd(self):
+        values = [
+            self.comspec + "::$DATA",
+            self.comspec.upper() + "::$DATA",
+            "cmd.exe::$DATA",
+            "CMD.EXE:x",
+            str(self.node_cmd) + "::$DATA",
+            str(self.node_cmd).upper() + "::$data",
+            "node.cmd::$DATA",
+            str(self.plain_cli) + ":stream",
+            "\\\\?\\" + self.comspec,
+        ]
+        for value in values:
+            with self.subTest(value=value):
+                with _env(**{HIGGSFIELD_CLI_ENV_VAR: str(self.plain_cli), "APPDATA": str(self.tmp)}):
+                    client = HiggsfieldClient(command=value)
+                self.assertIsNone(client.command)
+                self.assertEqual(client.command_source, "explicit")
+                self.assert_refused_without_process(client, HiggsfieldCLINotFoundError)
+
+    def test_default_under_ads_appdata_is_refused(self):
+        with _env(APPDATA=str(self.tmp) + "::$DATA"), patch.object(client_mod.os, "name", "nt"):
+            client = HiggsfieldClient()
+        self.assertIsNone(client.command)
+        self.assertEqual(client.command_source, "default")
+
+    def test_normal_windows_paths_still_accepted(self):
+        for value in (str(self.plain_cli), str(self.plain_cli).replace("\\", "/")):
+            with self.subTest(value=value):
+                with _env(**{HIGGSFIELD_CLI_ENV_VAR: value}):
+                    client = HiggsfieldClient()
+                self.assertEqual((client.command, client.command_source), (value, "environment"))
+                with patch("subprocess.run", return_value=_Completed()) as mock_run:
+                    client.account_status()
+                self.assertEqual(mock_run.call_args.args[0][:2], [value, "--json"])
+                self.assertIs(mock_run.call_args.kwargs["shell"], False)
+        for value in ("fake-higgsfield-cli", "\\\\server\\share\\higgsfield.exe", str(self.plain_cli)):
+            with self.subTest(value=value):
+                self.assertEqual(HiggsfieldClient(command=value).command, value)
+
+    def test_relative_environment_path_still_refused(self):
+        with _env(**{HIGGSFIELD_CLI_ENV_VAR: "higgsfield-cli.exe", "APPDATA": str(self.tmp)}):
+            client = HiggsfieldClient()
+        self.assertIsNone(client.command)
+        self.assertIn("absolute", client.command_error)
+
+    def test_ads_env_through_real_gate_is_a_structured_refusal(self):
+        # Avant STEP-3 : OSError brut levé par gate.evaluate().
+        with _env(**{HIGGSFIELD_CLI_ENV_VAR: str(self.plain_cli) + "::$DATA"}):
+            gate = GenerationApprovalGate(HiggsfieldProvider(client=HiggsfieldClient()))
+        with patch("subprocess.run") as mock_run:
+            decision = gate.evaluate(_request()).decision
+        mock_run.assert_not_called()
+        self.assertNotEqual(decision, GenerationApprovalDecision.APPROVED)
+
+
+class TestLaunchOSErrorNormalization(_TmpCase):
+    def setUp(self):
+        super().setUp()
+        self.client = HiggsfieldClient(command=str(self.plain_cli))
+
+    def _run_with(self, side_effect=None, return_value=None):
+        with patch("subprocess.run", side_effect=side_effect, return_value=return_value) as mock_run:
+            try:
+                self.client.account_status()
+            finally:
+                self.assertEqual(mock_run.call_count, 1)
+
+    def test_missing_file_still_cli_not_found(self):
+        original = FileNotFoundError(2, "not found")
+        with self.assertRaises(HiggsfieldCLINotFoundError) as ctx:
+            self._run_with(side_effect=original)
+        self.assertIs(ctx.exception.__cause__, original)
+
+    def test_launch_refusals_become_command_errors_not_not_found(self):
+        refusals = [
+            OSError(22, "bad exe format", None, 193),
+            OSError(22, "invalid name", None, 123),
+            PermissionError(13, "access denied"),
+            IsADirectoryError(21, "is a directory"),
+            OSError(5, "I/O error"),
+        ]
+        for original in refusals:
+            with self.subTest(error=repr(original)):
+                with self.assertRaises(HiggsfieldCommandError) as ctx:
+                    self._run_with(side_effect=original)
+                self.assertNotIsInstance(ctx.exception, HiggsfieldCLINotFoundError)
+                self.assertIsNone(ctx.exception.exit_code)
+                self.assertIs(ctx.exception.__cause__, original)
+                self.assertIn(str(self.plain_cli), str(ctx.exception))
+
+    def test_winerror_code_is_kept_in_the_message(self):
+        with self.assertRaises(HiggsfieldCommandError) as ctx:
+            self._run_with(side_effect=OSError(22, "bad exe format", None, 193))
+        if os.name == "nt":
+            self.assertIn("193", str(ctx.exception))
+
+    def test_timeout_still_timeout_error(self):
+        with self.assertRaises(HiggsfieldTimeoutError):
+            self._run_with(side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1))
+
+    def test_exit_code_auth_and_json_errors_unchanged(self):
+        class _Failed:
+            returncode = 3
+            stdout = ""
+            stderr = "boom"
+
+        class _Auth(_Failed):
+            stderr = "Not authenticated, please run auth login"
+
+        class _NotJson(_Completed):
+            stdout = "not json"
+
+        with self.assertRaises(HiggsfieldCommandError) as ctx:
+            self._run_with(return_value=_Failed())
+        self.assertEqual(ctx.exception.exit_code, 3)
+        with self.assertRaises(HiggsfieldAuthenticationError):
+            self._run_with(return_value=_Auth())
+        with self.assertRaises(HiggsfieldInvalidResponseError):
+            self._run_with(return_value=_NotJson())
+
+    def test_runtime_lock_refusal_is_never_normalized(self):
+        with patch("subprocess.run", side_effect=OSError(22, "x", None, 193)) as mock_run:
+            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+                self.client.run("generate", "create", "seedance_2_0", "--prompt", "x")
+        mock_run.assert_not_called()
+
+    def test_launch_refusal_through_real_gate_is_a_structured_refusal(self):
+        gate = GenerationApprovalGate(HiggsfieldProvider(client=self.client))
+        with patch("subprocess.run", side_effect=OSError(22, "bad exe format", None, 193)):
+            decision = gate.evaluate(_request()).decision
+        self.assertNotEqual(decision, GenerationApprovalDecision.APPROVED)
 
 
 if __name__ == "__main__":
