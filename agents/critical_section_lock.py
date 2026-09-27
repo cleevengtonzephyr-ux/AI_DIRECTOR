@@ -58,6 +58,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from agents.request_id_validation import contained_child_path, validate_request_id
+
 # Phase P3.98 (D4b) : nouvel essai borné de la suppression du verrou à la
 # libération (cf. `FileCriticalSectionLock.acquire()`).
 _RELEASE_RETRY_SECONDS = 1.0
@@ -98,8 +100,19 @@ class FileCriticalSectionLock:
 
     @contextmanager
     def acquire(self, request_id: str):
+        # Phase P3.103 (F7) : `request_id` validé AVANT toute construction
+        # de chemin, puis chemin confiné à `lock_dir` -- refus immédiat,
+        # avant toute écriture disque et tout create_job() (fail closed).
+        try:
+            validate_request_id(request_id)
+            lock_path = contained_child_path(self.lock_dir, f"{request_id}.lock")
+        except ValueError as error:
+            raise CriticalSectionBusyError(
+                f"Critical section for request {request_id!r} refused: "
+                f"{error} -- refusing to proceed (fail-closed)."
+            ) from error
+
         self.lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = self.lock_dir / f"{request_id}.lock"
 
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)

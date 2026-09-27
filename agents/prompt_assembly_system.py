@@ -1,6 +1,11 @@
 from pathlib import Path
 from typing import Dict
 
+from agents.request_id_validation import (
+    contained_child_path,
+    validate_request_id,
+)
+
 
 class PromptAssemblySystem:
     """
@@ -63,8 +68,13 @@ class PromptAssemblySystem:
         video_id: str,
     ) -> str:
 
-        video_filename = (
-            f"video_{video_id}.md"
+        # P3.103 (F7) : video_id validé AVANT toute construction de
+        # chemin, puis chemin confiné à prompt_root.
+        validate_request_id(video_id)
+
+        video_path = contained_child_path(
+            self.prompt_root,
+            f"video_{video_id}.md",
         )
 
         character_identity = self.load_prompt(
@@ -80,7 +90,7 @@ class PromptAssemblySystem:
         )
 
         video_prompt = self.load_prompt(
-            video_filename
+            video_path.name
         )
 
         master_prompt = f"""
@@ -137,6 +147,21 @@ END MASTER PROMPT
     ) -> Dict:
 
         errors = []
+
+        # P3.103 (F7) : refus avant toute construction de chemin.
+        try:
+            validate_request_id(video_id)
+            contained_child_path(
+                self.prompt_root,
+                f"video_{video_id}.md",
+            )
+        except ValueError as error:
+            return {
+                "status": "BLOCKED",
+                "errors": [
+                    f"Invalid video_id: {error}"
+                ],
+            }
 
         required_files = [
             self.REQUIRED_PROMPTS[
