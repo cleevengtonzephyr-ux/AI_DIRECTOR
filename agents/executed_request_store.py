@@ -320,33 +320,41 @@ class FileExecutedRequestStore:
                     ) from None
                 time.sleep(0.005)
 
+        # Phase P3.102 (F5) : le fd reste ouvert pendant TOUTE la section
+        # critique, fermé seulement à la libération -- comme
+        # `critical_section_lock.py`.
+        # Sous Windows, un fichier ouvert par `os.open` ne peut pas être
+        # supprimé par un autre processus (WinError 32) : fermé avant le
+        # `yield`, le verrou pouvait être supprimé pendant qu'il était
+        # détenu, un second processus entrait alors dans la section
+        # critique (mise à jour perdue du registre anti-rejeu).
         try:
-            try:
-                os.write(fd, json.dumps({
-                    "pid": os.getpid(),
-                    "acquired_at": datetime.now(timezone.utc).isoformat(),
-                }).encode("utf-8"))
-            finally:
-                os.close(fd)
+            os.write(fd, json.dumps({
+                "pid": os.getpid(),
+                "acquired_at": datetime.now(timezone.utc).isoformat(),
+            }).encode("utf-8"))
             yield
         finally:
-            release_deadline = time.monotonic() + _LOCK_RELEASE_RETRY_SECONDS
-            while True:
-                try:
-                    self.lock_path.unlink()
-                except PermissionError:
-                    # Phase P3.98 (D3) : sous Windows, un lecteur du verrou
-                    # (`_lock_holder()` d'un autre processus) fait échouer
-                    # la suppression ; abandonner aussitôt laissait orphelin
-                    # un verrou libéré proprement. Nouvel essai, borné --
-                    # ensuite comportement inchangé (verrou laissé : fail
-                    # closed, jamais supprimé automatiquement ailleurs).
-                    if time.monotonic() < release_deadline:
-                        time.sleep(_LOCK_RELEASE_RETRY_INTERVAL_SECONDS)
-                        continue
-                except OSError:
-                    pass
-                break
+            try:
+                os.close(fd)
+            finally:
+                release_deadline = time.monotonic() + _LOCK_RELEASE_RETRY_SECONDS
+                while True:
+                    try:
+                        self.lock_path.unlink()
+                    except PermissionError:
+                        # Phase P3.98 (D3) : sous Windows, un lecteur du verrou
+                        # (`_lock_holder()` d'un autre processus) fait échouer
+                        # la suppression ; abandonner aussitôt laissait orphelin
+                        # un verrou libéré proprement. Nouvel essai, borné --
+                        # ensuite comportement inchangé (verrou laissé : fail
+                        # closed, jamais supprimé automatiquement ailleurs).
+                        if time.monotonic() < release_deadline:
+                            time.sleep(_LOCK_RELEASE_RETRY_INTERVAL_SECONDS)
+                            continue
+                    except OSError:
+                        pass
+                    break
 
     def _lock_holder(self) -> str:
         try:
