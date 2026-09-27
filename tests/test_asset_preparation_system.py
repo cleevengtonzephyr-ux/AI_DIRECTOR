@@ -11,7 +11,7 @@ baseline). Aucun appel Higgsfield.
 import json
 import sys
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -60,6 +60,16 @@ class TestAssetPreparationSystem(unittest.TestCase):
                 )
                 self.assertEqual(asset.sha256, golden_entry["sha256"])
                 self.assertEqual(asset.role, golden_entry["role"])
+
+    def test_golden_snapshot_paths_are_repository_relative(self):
+        # Un snapshot régénéré via `run()` réécrit des chemins absolus
+        # propres à la machine : ils ne doivent pas être committés.
+        for filename, entry in self.golden_by_filename.items():
+            path = entry["path"]
+            windows = PureWindowsPath(path)
+            with self.subTest(filename=filename):
+                self.assertFalse(windows.drive or windows.root, path)
+                self.assertFalse(PurePosixPath(path).is_absolute(), path)
 
 
 if __name__ == "__main__":
