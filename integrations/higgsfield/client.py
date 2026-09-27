@@ -152,6 +152,66 @@ def _is_node_exe(executable: str) -> bool:
     return Path(str(executable).rstrip(" .")).name.lower() == "node.exe"
 
 
+# Phase P3.105 (F8-2) -- résolution de l'exécutable CLI, sans lancer quoi que
+# ce soit. Priorité :
+#   1. `HiggsfieldClient(command=...)` explicite (non None) ;
+#   2. variable d'environnement `HIGGSFIELD_CLI_PATH` ;
+#   3. défaut npm global Windows : `%APPDATA%\npm\higgsfield.cmd`.
+# Une source présente mais invalide ne retombe JAMAIS sur la suivante : le
+# client reste non configuré et `run()` refuse avant tout processus. Le
+# chemin résolu reste soumis à TOUS les contrôles P3.92 de `run()`
+# (repli cmd.exe refusé, interpréteur node.exe exigé) et, en plus, un
+# interpréteur de commandes désigné directement est refusé.
+HIGGSFIELD_CLI_ENV_VAR = "HIGGSFIELD_CLI_PATH"
+
+# Interpréteurs qui ré-analysent leurs arguments comme des commandes : les
+# désigner comme « CLI » rouvrirait l'injection P3.92 par un autre chemin.
+_SHELL_INTERPRETER_NAMES = frozenset(
+    {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+)
+
+
+def _is_shell_interpreter(command: str) -> bool:
+    return Path(str(command).rstrip(" .")).name.lower() in _SHELL_INTERPRETER_NAMES
+
+
+def _default_cli_command() -> Optional[str]:
+    if os.name != "nt":
+        return None
+    appdata = os.environ.get("APPDATA")
+    if not appdata or not Path(appdata).is_absolute():
+        return None
+    return str(Path(appdata) / "npm" / "higgsfield.cmd")
+
+
+def _resolve_cli_command(command: Optional[str]):
+    """Retourne `(command, source, error)` ; `command` est None si la
+    source retenue est absente ou invalide (jamais de repli)."""
+
+    if command is not None:
+        if not isinstance(command, str) or not command.strip() or "\x00" in command:
+            return None, "explicit", f"explicit command {command!r} is empty or invalid"
+        return command, "explicit", None
+
+    configured = os.environ.get(HIGGSFIELD_CLI_ENV_VAR)
+    if configured is not None:
+        path = Path(configured) if configured.strip() and "\x00" not in configured else None
+        if path is None or not path.is_absolute() or not path.is_file():
+            return None, "environment", (
+                f"{HIGGSFIELD_CLI_ENV_VAR}={configured!r} must be an absolute "
+                f"path to an existing file"
+            )
+        return configured, "environment", None
+
+    default = _default_cli_command()
+    if default is None:
+        return None, "default", (
+            f"no Higgsfield CLI configured: set {HIGGSFIELD_CLI_ENV_VAR} or pass "
+            f"command= (no default outside Windows or without %APPDATA%)"
+        )
+    return default, "default", None
+
+
 def build_create_job_args(job_type: str, prompt: str, **params: Any) -> List[str]:
     """
     Arguments CLI documentés d'une génération réelle (`generate create`).
@@ -226,7 +286,8 @@ class HiggsfieldClient:
         command: Optional[str] = None,
         timeout: Optional[float] = None,
     ):
-        self.command = command or r"C:\Users\omnia\AppData\Roaming\npm\higgsfield.cmd"
+        # Phase P3.105 (F8-2) : cf. `_resolve_cli_command()`.
+        self.command, self.command_source, self.command_error = _resolve_cli_command(command)
         self.timeout = timeout or self.DEFAULT_TIMEOUT_SECONDS
         self._direct_invocation = self._resolve_direct_invocation()
 
@@ -260,7 +321,7 @@ class HiggsfieldClient:
         - aucun exécutable Node.js n'est trouvable.
         """
 
-        if os.name != "nt":
+        if os.name != "nt" or self.command is None:
             return None
 
         command_path = Path(self.command)
@@ -341,6 +402,19 @@ class HiggsfieldClient:
                     "[--cursor <token>].",
                     reasons=transactions_violations,
                 )
+        if self.command is None:
+            # Phase P3.105 (F8-2) : source absente ou invalide -- aucun repli.
+            raise HiggsfieldCLINotFoundError(
+                f"Higgsfield CLI not configured ({self.command_source}): "
+                f"{self.command_error}. No process started."
+            )
+        if _is_shell_interpreter(self.command):
+            raise HiggsfieldRealGenerationDisabledError(
+                "HiggsfieldClient.run() never launches a command interpreter as "
+                "the Higgsfield CLI (Phase P3.105): it would re-parse the "
+                "arguments exactly like the refused cmd.exe fallback (P3.92).",
+                reasons=[f"shell_interpreter_refused: {self.command!r}"],
+            )
         if self._direct_invocation is None and _runs_through_cmd_exe(self.command):
             raise HiggsfieldRealGenerationDisabledError(
                 "HiggsfieldClient.run() never executes the Higgsfield CLI through "
