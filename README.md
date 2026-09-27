@@ -45,7 +45,7 @@ Le nouveau pipeline (Phases B-N, P2, P3) est la seule chaîne d'autorité réell
 
 ## Environnement Python
 
-Version supportée : **Python 3.14** (CPython, Windows), déclarée dans `.python-version`. C'est la seule version sur laquelle la suite complète a été exécutée et validée (Phase P3.106). Bibliothèque standard uniquement : aucune dépendance tierce.
+Version supportée : **Python 3.14** (CPython, Windows), déclarée dans `.python-version`. Ce fichier se contente de déclarer la version : il n'installe pas Python et n'en gère pas l'installation, l'interpréteur doit être installé séparément. C'est la seule version sur laquelle la suite complète a été exécutée et validée (Phase P3.106). Bibliothèque standard uniquement : aucune dépendance tierce.
 
 Le code exige au minimum Python 3.11 (`BaseException.add_note()`, `agents/executed_request_store.py`), mais les versions 3.11 à 3.13 n'ont jamais été validées et ne sont **pas** déclarées supportées. Certains garde-fous dépendent de comportements précis de la bibliothèque standard sous Windows (résolution de chemins, lancement de processus). Changer de version impose donc de relancer la suite complète, puis de mettre à jour cette déclaration. `tests/test_p3_106_python_version.py` échoue tant que l'interpréteur utilisé diffère de la version déclarée.
 
