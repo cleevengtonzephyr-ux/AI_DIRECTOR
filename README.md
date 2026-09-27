@@ -43,6 +43,12 @@ Le nouveau pipeline (Phases B-N, P2, P3) est la seule chaîne d'autorité réell
 - **`python scripts/demo_test.py`** — démonstration de bout en bout du pipeline complet via `MockHiggsfieldProvider` (aucun réseau, aucun CLI réel, aucun crédit). Illustre 3 scénarios : sans approbation (`NEEDS_APPROVAL`), approuvé (`EXECUTED_PASS`), budget insuffisant (`BLOCKED`).
 - **`python scripts/architecture_audit.py`** — audit ponctuel, en lecture seule, de la cartographie architecturale canonique (`agents/canonical_architecture_contract.py`) contre l'état réel du repository, via le Architecture Drift Detector (`agents/architecture_drift_detector.py`). Code de sortie `0` = `NO_DRIFT`, `1` = `DRIFT_DETECTED`, `2` = `ANALYSIS_INCOMPLETE`. Ce même contrôle s'exécute déjà automatiquement à chaque lancement de la suite de tests (`tests/test_architecture_drift_detector.py`, `tests/test_architecture_contract_integration.py`) ; ce script sert uniquement à l'invoquer isolément.
 
+## Environnement Python
+
+Version supportée : **Python 3.14** (CPython, Windows), déclarée dans `.python-version`. C'est la seule version sur laquelle la suite complète a été exécutée et validée (Phase P3.106). Bibliothèque standard uniquement : aucune dépendance tierce.
+
+Le code exige au minimum Python 3.11 (`BaseException.add_note()`, `agents/executed_request_store.py`), mais les versions 3.11 à 3.13 n'ont jamais été validées et ne sont **pas** déclarées supportées. Certains garde-fous dépendent de comportements précis de la bibliothèque standard sous Windows (résolution de chemins, lancement de processus). Changer de version impose donc de relancer la suite complète, puis de mettre à jour cette déclaration. `tests/test_p3_106_python_version.py` échoue tant que l'interpréteur utilisé diffère de la version déclarée.
+
 ## Tests
 
 ```
