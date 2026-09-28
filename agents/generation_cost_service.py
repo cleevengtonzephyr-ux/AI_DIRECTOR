@@ -22,19 +22,22 @@ un GenerationCostResult typé à 3 états : KNOWN / UNKNOWN / ERROR.
 
 RELATION AVEC agents/cost_engine.py (V1) — IMPORTANT :
 
-`CostEngine` (V1) reste la référence pour la DÉCISION BUDGÉTAIRE
-(comparaison coût vs solde disponible, statut APPROVED/BLOCKED),
-utilisée aujourd'hui par `ProductionGate`. Cette responsabilité N'EST
-PAS dupliquée ici et `CostEngine` n'est PAS modifié par cette phase.
+`CostEngine` (V1) n'est plus sur le chemin de production actif : ses
+appelants (`ProductionGate`, `production_controller.py`) sont, comme
+lui, des modules V1 orphelins jamais atteints depuis director.py
+(tests/test_v1_orphan_isolation.py). La DÉCISION BUDGÉTAIRE active
+(comparaison coût vs solde disponible) est prise par
+`GenerationApprovalGate` (agents/generation_approval_gate.py), qui lit
+le solde via le Provider. Ce service ne prend aucune décision
+budgétaire, et `CostEngine` n'est pas modifié.
 
-`GenerationCostService` ajoute une capacité qui n'existe pas encore
-dans le projet : distinguer explicitement un coût CONNU, un coût
+`GenerationCostService` distingue explicitement un coût CONNU, un coût
 INCONNU (le Provider a répondu sans erreur mais sans valeur
-exploitable) et une ERREUR survenue pendant l'estimation — alors que
-`CostEngine.get_verified_cost()` confond aujourd'hui ces deux derniers
-cas dans un même retour `None` (`except Exception: return None`).
-`GenerationApprovalGate` (agents/generation_approval_gate.py) consomme
-aujourd'hui ce résultat typé : ERROR -> BLOCKED ; UNKNOWN ->
+exploitable) et une ERREUR survenue pendant l'estimation — là où
+`CostEngine.get_verified_cost()` (V1) confond ces deux derniers cas
+dans un même retour `None` (`except Exception: return None`).
+`GenerationApprovalGate` consomme aujourd'hui ce résultat typé :
+ERROR -> BLOCKED ; UNKNOWN ->
 NEEDS_APPROVAL si l'approbation explicite ou l'autorisation humaine
 explicite manque, et APPROVED seulement si les deux sont fournies
 (jamais d'autorisation silencieuse).
