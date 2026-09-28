@@ -19,7 +19,9 @@ tested here only; it is NOT exercised against the real backend.
 """
 
 import json
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -35,6 +37,35 @@ import integrations.higgsfield.client as client_mod
 from integrations.higgsfield.client import HiggsfieldClient
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.provider import HiggsfieldProvider
+
+
+# Fixture hermétique : un npm layout temporaire remplace le CLI Higgsfield
+# installé sur la machine. Tout `HiggsfieldClient()` du module résout ce
+# shim puis l'invocation Node directe (P3.92-R1) ; sans elle, `run()`
+# refuse le shim .cmd avant tout processus.
+_FAKE_NPM_SHIM = (
+    '@ECHO off\n'
+    'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+    '"%dp0%\\node_modules\\@higgsfield\\cli\\bin\\higgsfield.js"  %*\n'
+)
+_FIXTURE_NODE_EXE = None
+
+
+def setUpModule():
+    global _FIXTURE_NODE_EXE
+    tmp = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(tmp.cleanup)
+    root = Path(tmp.name)
+    bin_dir = root / "node_modules" / "@higgsfield" / "cli" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "higgsfield.js").write_text("// fake entry\n", encoding="utf-8")
+    (root / "node.exe").write_text("", encoding="utf-8")
+    shim = root / "higgsfield.cmd"
+    shim.write_text(_FAKE_NPM_SHIM, encoding="utf-8")
+    env = mock.patch.dict(os.environ, {client_mod.HIGGSFIELD_CLI_ENV_VAR: str(shim), "APPDATA": str(root)})
+    env.start()
+    unittest.addModuleCleanup(env.stop)
+    _FIXTURE_NODE_EXE = root / "node.exe"
 
 
 class _FakeSubprocess(types.ModuleType):
@@ -190,6 +221,13 @@ class TestLocksAndSeparationStayIntact(_TxCase):
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
             HiggsfieldProvider(client=self.client).create_job(job_type="seedance_2_0", prompt="P", duration=15)
         self.assertEqual(self.fake.calls, [])
+
+
+class TestHermeticCliFixture(unittest.TestCase):
+    def test_default_client_resolves_the_temporary_node_exe(self):
+        invocation = HiggsfieldClient()._direct_invocation
+        self.assertIsNotNone(invocation)
+        self.assertEqual(Path(invocation[0]), _FIXTURE_NODE_EXE)
 
 
 if __name__ == "__main__":
