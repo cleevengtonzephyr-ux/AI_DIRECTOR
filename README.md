@@ -61,6 +61,8 @@ Tous les tests touchant à la génération vidéo utilisent exclusivement `MockH
 python -m compileall agents integrations scripts .
 ```
 
+Intégration continue : le workflow GitHub Actions `.github/workflows/ci.yml` exécute cette suite complète puis `python scripts/architecture_audit.py` (résultat attendu : `NO_DRIFT`) à chaque push et pull request vers `main`, sur un runner `windows-2025` avec Python 3.14.5 exactement. L'échec de l'une ou l'autre étape fait échouer le workflow.
+
 ## Sécurité
 
 - `HiggsfieldProvider.create_job()` (réel) lève systématiquement `HiggsfieldRealGenerationDisabledError` — ce garde-fou est indépendant de toute autre logique (Approval Gate, budget) et n'a jamais été désactivé au cours du développement.

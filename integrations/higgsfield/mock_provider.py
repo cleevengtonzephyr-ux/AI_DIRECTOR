@@ -19,7 +19,8 @@ Vocabulaire des statuts (Phase E) :
 Le MASTER PROMPT V2 décrit le cycle global
 NEEDS_APPROVAL -> APPROVED -> RUNNING -> WAITING -> COMPLETED. Les états
 NEEDS_APPROVAL/APPROVED sont des décisions MÉTIER prises en amont de la
-création du job (futur Approval Gate, Priorité 2 de la roadmap) : un
+création du job (par `GenerationApprovalGate`,
+agents/generation_approval_gate.py) : un
 job Higgsfield n'existe pas encore à ce stade, donc ce Provider — qui
 représente uniquement le CYCLE DE VIE D'UN JOB DÉJÀ CRÉÉ — ne les
 modélise pas. Introduire ces états dans JobStatus (types.py, partagé

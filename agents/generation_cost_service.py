@@ -32,11 +32,12 @@ dans le projet : distinguer explicitement un coût CONNU, un coût
 INCONNU (le Provider a répondu sans erreur mais sans valeur
 exploitable) et une ERREUR survenue pendant l'estimation — alors que
 `CostEngine.get_verified_cost()` confond aujourd'hui ces deux derniers
-cas dans un même retour `None` (`except Exception: return None`). Un
-futur Approval Gate (Priorité 2, hors périmètre de cette phase) pourra
-consommer ce résultat typé pour traiter le cas UNKNOWN différemment
-d'une ERROR, comme prévu par le MASTER PROMPT V2 ("permettre au futur
-Approval Gate de traiter ce cas comme prévu").
+cas dans un même retour `None` (`except Exception: return None`).
+`GenerationApprovalGate` (agents/generation_approval_gate.py) consomme
+aujourd'hui ce résultat typé : ERROR -> BLOCKED ; UNKNOWN ->
+NEEDS_APPROVAL si l'approbation explicite ou l'autorisation humaine
+explicite manque, et APPROVED seulement si les deux sont fournies
+(jamais d'autorisation silencieuse).
 
 RÈGLE ABSOLUE :
 - Aucun prix n'est jamais inventé ou codé en dur ici (délégation
