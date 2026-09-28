@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -108,6 +108,10 @@ from integrations.higgsfield.types import MediaReference
 CONFIRMED_DURATIONS_BY_MODEL: dict = {
     PRODUCTION_MODEL: (5, 10, 15),
 }
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class GenerationApprovalDecision(str, Enum):
@@ -228,12 +232,18 @@ class GenerationApprovalGate:
     (toute communication passe par un BaseHiggsfieldProvider injecté).
     """
 
+    # Phase B (docs/phase_a_real_generation_decision.md, condition 2) :
+    # une RealGenerationAuthorization expire au plus tard 300 secondes
+    # après `authorized_at`. Âge == 300 s accepté, > 300 s refusé.
+    MAX_AUTHORIZATION_AGE_SECONDS = 300.0
+
     def __init__(
         self,
         provider: BaseHiggsfieldProvider,
         cost_service: Optional[GenerationCostService] = None,
         executed_request_store=None,
         identity_lock: Optional[ReleaseCandidateIdentityLock] = None,
+        clock: Optional[Callable[[], datetime]] = None,
     ):
         """
         `executed_request_store` (Phase P2.15) : persiste le replay
@@ -255,12 +265,18 @@ class GenerationApprovalGate:
         argument. Le chemin de production réel (director.py) injecte
         explicitement un `ReleaseCandidateIdentityLock` lié à la
         Release Candidate actuellement validée (Video 005).
+
+        `clock` (Phase B) : horloge UTC utilisée pour vérifier
+        l'expiration de `RealGenerationAuthorization.authorized_at`.
+        Par défaut, l'heure réelle ; injectable pour des tests
+        déterministes.
         """
 
         self.provider = provider
         self.cost_service = cost_service or GenerationCostService(provider)
         self.executed_request_store = executed_request_store or InMemoryExecutedRequestStore()
         self.identity_lock = identity_lock
+        self._clock = clock or _utc_now
 
     # ------------------------------------------------------------------
     # DÉCISION PRINCIPALE
@@ -527,8 +543,10 @@ class GenerationApprovalGate:
         Ne fait JAMAIS de fallback vers `approved`, le budget, un
         cache ou une configuration : seule une instance de
         RealGenerationAuthorization explicitement construite, avec
-        `authorized_by_human is True` et `request_id` correspondant
-        exactement à cette requête, est acceptée.
+        `authorized_by_human is True`, `request_id` correspondant
+        exactement à cette requête et `authorized_at` frais (Phase B :
+        au plus MAX_AUTHORIZATION_AGE_SECONDS, jamais dans le futur),
+        est acceptée.
         """
 
         auth = request.real_generation_authorization
@@ -558,6 +576,41 @@ class GenerationApprovalGate:
                 f"'{request.request_id}'."
             ]
 
+        return self._authorization_freshness_reasons(auth)
+
+    def _authorization_freshness_reasons(self, auth: RealGenerationAuthorization) -> List[str]:
+        """Phase B : refuse un `authorized_at` absent, invalide, sans
+        fuseau, futur ou plus vieux que MAX_AUTHORIZATION_AGE_SECONDS."""
+
+        raw = auth.authorized_at
+        if not isinstance(raw, str) or not raw.strip():
+            return ["real_generation_authorization.authorized_at is missing."]
+        try:
+            issued_at = datetime.fromisoformat(raw)
+        except ValueError:
+            return [
+                f"real_generation_authorization.authorized_at {raw!r} is "
+                f"not a valid ISO-8601 timestamp."
+            ]
+        if issued_at.utcoffset() is None:
+            return [
+                f"real_generation_authorization.authorized_at {raw!r} has "
+                f"no timezone -- ambiguous, refused."
+            ]
+        try:
+            age_seconds = (self._clock() - issued_at).total_seconds()
+        except TypeError:
+            return ["Gate clock is not timezone-aware -- authorization freshness cannot be verified."]
+        if age_seconds < 0:
+            return [
+                f"real_generation_authorization.authorized_at {raw!r} is in "
+                f"the future."
+            ]
+        if age_seconds > self.MAX_AUTHORIZATION_AGE_SECONDS:
+            return [
+                f"real_generation_authorization expired: issued "
+                f"{age_seconds:.0f}s ago, max {self.MAX_AUTHORIZATION_AGE_SECONDS:.0f}s."
+            ]
         return []
 
     # ------------------------------------------------------------------

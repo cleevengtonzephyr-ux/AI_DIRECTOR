@@ -170,14 +170,13 @@ class TestC_AuthorizationForAnotherRequest(unittest.TestCase):
 
 class TestD_NoExpirationInventedNoImplicitReuse(unittest.TestCase):
     """
-    Attaque D — le projet ne possède AUCUNE notion d'expiration
-    (`authorized_at` n'est jamais parsé/comparé par le Gate) ; cette
-    phase n'en invente pas. Vérifié à la place : une autorisation ne
-    peut jamais être récupérée automatiquement pour une NOUVELLE
-    requête qui n'en porte pas elle-même une.
+    Attaque D — une autorisation ne peut jamais être récupérée
+    automatiquement pour une NOUVELLE requête qui n'en porte pas
+    elle-même une. Phase B : `authorized_at` est désormais vérifié par
+    le Gate (expiration, cf. tests/test_phase_b_authorization_expiry.py).
     """
 
-    def test_authorized_at_is_never_parsed_or_validated_by_the_gate(self):
+    def test_invalid_authorized_at_is_refused_by_the_gate(self):
         provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=100.0)
         gate = GenerationApprovalGate(provider)
 
@@ -186,10 +185,9 @@ class TestD_NoExpirationInventedNoImplicitReuse(unittest.TestCase):
         )
         result = gate.evaluate(_request(real_generation_authorization=garbage_timestamp_auth))
 
-        # Champ metadata pur : n'affecte pas la décision (aucune
-        # sémantique d'expiration n'existe -- volontairement pas
-        # inventée ici, cf. section 6 de l'énoncé P2.12).
-        self.assertEqual(result.decision, GenerationApprovalDecision.APPROVED)
+        # Phase B : un horodatage invalide n'est plus une simple
+        # métadonnée -- l'autorisation est refusée, jamais APPROVED.
+        self.assertNotEqual(result.decision, GenerationApprovalDecision.APPROVED)
 
     def test_a_fresh_request_without_its_own_authorization_never_inherits_a_prior_one(self):
         provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=100.0)
@@ -314,6 +312,10 @@ class TestJ_NoCacheOfAnyPriorDecision(unittest.TestCase):
         # contrat immuable injecté par l'appelant -- jamais une
         # décision/coût/solde/autorisation mise en cache par le Gate
         # lui-même, donc conforme au même invariant.
+        #
+        # Phase B : `_clock` est une fonction d'horloge sans état,
+        # relue à chaque évaluation pour l'expiration de
+        # `authorized_at` -- jamais une valeur mise en cache.
         provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=100.0)
         gate = GenerationApprovalGate(provider)
 
@@ -322,8 +324,9 @@ class TestJ_NoCacheOfAnyPriorDecision(unittest.TestCase):
         attribute_names = set(vars(gate).keys())
         self.assertEqual(
             attribute_names,
-            {"provider", "cost_service", "executed_request_store", "identity_lock"},
+            {"provider", "cost_service", "executed_request_store", "identity_lock", "_clock"},
         )
+        self.assertTrue(callable(gate._clock))
 
         store = gate.executed_request_store
         self.assertIsInstance(store, InMemoryExecutedRequestStore)
