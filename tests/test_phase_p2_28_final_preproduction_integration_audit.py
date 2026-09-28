@@ -183,34 +183,49 @@ class TestRealDirectorWiringEndToEnd(P2_28_TestCase):
         self.assertEqual(report.provider_activation_decision, ActivationDecision.APPROVED)
 
     def test_real_director_chain_with_real_provider_stays_blocked(self):
+        # Phase B : les chemins persistants de la chaîne réelle (store,
+        # registre de consommation, verrou) sont redirigés vers un
+        # dossier temporaire -- la chaîne (Gate, services,
+        # HiggsfieldProvider réel) reste celle construite par
+        # `AIDirector` ; aucun accès au `state/` réel.
+        from agents.executed_request_store import FileExecutedRequestStore
+        from tests.test_phase_b_authorization_single_use import isolated_director_state
+
         director = AIDirector()
         director.higgsfield = _fake_client(cost=10.0, balance=100.0)
+        authorization = RealGenerationAuthorization(request_id="005", authorized_by_human=True)
 
-        report = director.check_activation_readiness(self._real_request())
-        # readiness: tout est vert SAUF le provider (chaîne réelle =
-        # HiggsfieldProvider réel, structurellement désactivé).
-        self.assertTrue(report.technical_ready)
-        self.assertTrue(report.request_identity_ready)
-        self.assertTrue(report.prompt_ready)
-        self.assertTrue(report.asset_ready)
-        self.assertTrue(report.budget_ready)
-        self.assertTrue(report.authorization_ready)
-        self.assertFalse(report.provider_ready)
-        self.assertEqual(report.decision, "NOT_READY")
+        with isolated_director_state(self._tmp) as isolated_state:
+            report = director.check_activation_readiness(self._real_request())
+            # readiness: tout est vert SAUF le provider (chaîne réelle =
+            # HiggsfieldProvider réel, structurellement désactivé).
+            self.assertTrue(report.technical_ready)
+            self.assertTrue(report.request_identity_ready)
+            self.assertTrue(report.prompt_ready)
+            self.assertTrue(report.asset_ready)
+            self.assertTrue(report.budget_ready)
+            self.assertTrue(report.authorization_ready)
+            self.assertFalse(report.provider_ready)
+            self.assertEqual(report.decision, "NOT_READY")
 
-        # run_video_mission(), le VRAI point d'entrée public, utilise
-        # la chaîne réelle (HiggsfieldProvider réel) et reste bloqué.
-        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-            director.run_video_mission(
-                video_id="005", title="t", hook="h", objective="o",
-                duration=CONFIRMED_DURATION, approved=True,
-                real_generation_authorization=RealGenerationAuthorization(
-                    request_id="005", authorized_by_human=True
-                ),
-                interval_seconds=0,
-            )
+            # run_video_mission(), le VRAI point d'entrée public, utilise
+            # la chaîne réelle (HiggsfieldProvider réel) et reste bloqué.
+            # Phase B : il consomme l'autorisation avant le refus du
+            # Provider (registre persistant, ici temporaire).
+            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+                director.run_video_mission(
+                    video_id="005", title="t", hook="h", objective="o",
+                    duration=CONFIRMED_DURATION, approved=True,
+                    real_generation_authorization=authorization,
+                    interval_seconds=0,
+                )
 
         director.higgsfield.create_job.assert_not_called()
+        self.assertFalse((isolated_state / "executed_requests.json").exists())
+        self.assertTrue(
+            FileExecutedRequestStore(isolated_state / "executed_requests.json")
+            .authorization_registry.is_consumed(authorization.authorization_id)
+        )
 
 
 # ----------------------------------------------------------------------

@@ -577,7 +577,15 @@ class TestV_ProviderDisabledWithFullStackValid(P2_25_TestCase):
         }
         real_provider = HiggsfieldProvider(client=fake_client)
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(real_provider, identity_lock=identity_lock)
+        # Phase B : store persistant TEMPORAIRE (replay_safe exige une
+        # garantie durable ; jamais le `state/` réel).
+        from agents.executed_request_store import FileExecutedRequestStore
+
+        gate = GenerationApprovalGate(
+            real_provider,
+            executed_request_store=FileExecutedRequestStore(self._tmp / "state" / "executed_requests.json"),
+            identity_lock=identity_lock,
+        )
         activation_service = RequestScopedActivationService(gate, identity_lock)
         lock = FileCriticalSectionLock(self._tmp)
         job_service = GenerationJobService(

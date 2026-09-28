@@ -78,6 +78,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from agents.executed_request_store import (
     ExecutedRequestStoreCorruptedError,
     InMemoryExecutedRequestStore,
+    InvalidAuthorizationIdError,
+    validate_authorization_id,
 )
 from agents.generation_cost_service import (
     CostEstimationStatus,
@@ -305,6 +307,7 @@ class GenerationApprovalGate:
             is_unknown_state = self.executed_request_store.is_unknown(
                 request.request_id
             )
+            consumption_reasons = self._authorization_consumption_reasons(request)
         except ExecutedRequestStoreCorruptedError as error:
             # FAIL CLOSED (Phase P2.15) : un état de replay guard
             # illisible/corrompu ne doit JAMAIS être interprété comme
@@ -380,6 +383,7 @@ class GenerationApprovalGate:
                 )
 
             reasons.extend(self._human_authorization_reasons(request))
+            reasons.extend(consumption_reasons)
 
             if reasons:
                 return GenerationApprovalResult(
@@ -450,6 +454,7 @@ class GenerationApprovalGate:
             )
 
         reasons.extend(self._human_authorization_reasons(request))
+        reasons.extend(consumption_reasons)
 
         if reasons:
             return GenerationApprovalResult(
@@ -524,6 +529,72 @@ class GenerationApprovalGate:
         """
 
         return self.executed_request_store.in_flight(request_id)
+
+    def _authorization_registry(self):
+        """Phase B — registre de consommation du store injecté. Absent
+        ou incomplet -> ExecutedRequestStoreCorruptedError (fail closed :
+        BLOCKED à l'évaluation, aucune tentative à l'exécution)."""
+
+        registry = getattr(self.executed_request_store, "authorization_registry", None)
+        if not (
+            callable(getattr(registry, "is_consumed", None))
+            and callable(getattr(registry, "consume", None))
+        ):
+            raise ExecutedRequestStoreCorruptedError(
+                "executed_request_store exposes no authorization consumption "
+                "registry (Phase B) -- single use cannot be verified or "
+                "enforced; failing closed."
+            )
+        return registry
+
+    def consume_authorization(self, request_id: str, authorization_id) -> None:
+        """
+        Phase B — à appeler par GenerationJobService UNIQUEMENT, dans la
+        section critique, APRÈS toutes les vérifications et JUSTE AVANT
+        `in_flight()`/`create_job()`. Vérifie puis inscrit atomiquement
+        l'autorisation dans le registre séparé, définitivement (jamais
+        annulée, même si le Provider refuse). Identifiant invalide, déjà
+        consommé, registre absent/illisible/verrouillé, écriture
+        impossible -> exception : l'appelant n'atteint jamais
+        `create_job()`. Écrite AVANT le marqueur write-ahead (pas de
+        transaction commune) : un arrêt entre les deux brûle
+        l'autorisation sans exécution -- échec fermé assumé.
+        """
+
+        validate_authorization_id(authorization_id)
+        self._authorization_registry().consume(authorization_id, request_id)
+
+    def is_authorization_consumed(self, authorization_id: str) -> bool:
+        """Phase B — lecture seule du registre de consommation."""
+
+        return self._authorization_registry().is_consumed(authorization_id)
+
+    def _authorization_consumption_reasons(self, request: GenerationRequest) -> List[str]:
+        """
+        Phase B — lecture seule du registre de consommation, volontairement
+        HORS de `_human_authorization_reasons()` (qui ne lit jamais le
+        store, invariant P3.40). Liste vide == autorisation non consommée
+        (ou absente : `_human_authorization_reasons()` la refuse déjà).
+        Registre absent ou illisible -> ExecutedRequestStoreCorruptedError,
+        transformée en BLOCKED par `evaluate()`.
+        """
+
+        auth = request.real_generation_authorization
+        if not isinstance(auth, RealGenerationAuthorization):
+            return []
+
+        try:
+            authorization_id = validate_authorization_id(auth.authorization_id)
+        except InvalidAuthorizationIdError as error:
+            return [f"real_generation_authorization.authorization_id is invalid: {error}"]
+
+        if self._authorization_registry().is_consumed(authorization_id):
+            return [
+                f"real_generation_authorization '{authorization_id}' has "
+                f"already been consumed by a prior execution attempt; a new "
+                f"explicit human authorization is required."
+            ]
+        return []
 
     def is_unknown(self, request_id: str) -> bool:
         return self.executed_request_store.is_unknown(request_id)

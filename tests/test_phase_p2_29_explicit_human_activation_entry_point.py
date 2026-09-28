@@ -271,15 +271,19 @@ class TestDoubleConsent(P2_29_TestCase):
             self._prepare(report_service=report_service)
 
     def test_E_real_provider_blocks_p2_26_contract(self):
+        from tests.test_phase_b_authorization_single_use import isolated_director_state
+
         director = AIDirector()
         director.higgsfield = _fake_client(cost=10.0, balance=100.0)
-        # report_service=None -> chaîne réelle (HiggsfieldProvider réel)
-        with self.assertRaises(ControlledRealProviderActivationRejectedError):
-            director.prepare_real_generation_activation(
-                video_id="005", title="t", hook="h", objective="o",
-                duration=CONFIRMED_DURATION, approved=True,
-                real_generation_authorization=_valid_auth("005"),
-            )
+        # report_service=None -> chaîne réelle (HiggsfieldProvider réel) ;
+        # Phase B : ses chemins persistants redirigés vers self._tmp.
+        with isolated_director_state(self._tmp):
+            with self.assertRaises(ControlledRealProviderActivationRejectedError):
+                director.prepare_real_generation_activation(
+                    video_id="005", title="t", hook="h", objective="o",
+                    duration=CONFIRMED_DURATION, approved=True,
+                    real_generation_authorization=_valid_auth("005"),
+                )
 
     def test_F_all_correct_preparation_succeeds(self):
         prepared = self._prepare()
@@ -379,16 +383,23 @@ class TestMockPositivePath(P2_29_TestCase):
 
 class TestRealProviderNegativePath(unittest.TestCase):
     def test_real_provider_blocks_even_with_valid_authorization_and_gate(self):
+        from tests.test_phase_b_authorization_single_use import isolated_director_state
+
         director = AIDirector()
         director.higgsfield = _fake_client(cost=10.0, balance=100.0)
 
-        # La frontière P2.26 refuse déjà à la préparation.
-        with self.assertRaises(ControlledRealProviderActivationRejectedError):
-            director.prepare_real_generation_activation(
-                video_id="005", title="t", hook="h", objective="o",
-                duration=CONFIRMED_DURATION, approved=True,
-                real_generation_authorization=_valid_auth("005"),
-            )
+        # La frontière P2.26 refuse déjà à la préparation. Phase B :
+        # chemins persistants de la chaîne réelle redirigés vers un
+        # dossier temporaire (jamais le `state/` réel).
+        tmp = Path(tempfile.mkdtemp(prefix="p2_29_director_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with isolated_director_state(tmp):
+            with self.assertRaises(ControlledRealProviderActivationRejectedError):
+                director.prepare_real_generation_activation(
+                    video_id="005", title="t", hook="h", objective="o",
+                    duration=CONFIRMED_DURATION, approved=True,
+                    real_generation_authorization=_valid_auth("005"),
+                )
 
         director.higgsfield.create_job.assert_not_called()
 

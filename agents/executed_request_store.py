@@ -116,11 +116,48 @@ PHASE P3.91 — DEUX RISQUES DÉMONTRÉS EN P3.90, FERMÉS ICI :
    `agents/critical_section_lock.py` ; mécanisme volontairement
    indépendant (aucun import de ce module ni du sous-système
    certificats).
+
+PHASE B — USAGE UNIQUE DE `RealGenerationAuthorization` :
+Registre SÉPARÉ, exclusivement dédié à la consommation des
+autorisations (`FileAuthorizationConsumptionRegistry`, fichier
+`consumed_authorizations.json` dans le MÊME dossier d'état, verrou
+propre `consumed_authorizations.json.lock`). `executed_requests.json`
+reste inchangé et ne contient toujours AUCUNE donnée ni référence
+d'autorisation (invariant P3.89). Chaque store expose son registre via
+l'attribut `authorization_registry` (non appelable : l'API publique du
+store est inchangée).
+- Contenu : uniquement `sha256(authorization_id)` -> `{"request_id",
+  "consumed_at"}`. Jamais l'objet d'autorisation, `note`,
+  `authorized_by_human`, `authorized_at`, le prompt ni aucun contenu.
+- `consume()` : vérification + inscription dans UNE écriture atomique
+  (fichier temporaire + fsync + `os.replace`) sous le verrou du
+  registre -- sûr entre threads et entre processus partageant ce
+  dossier. Déjà consommée -> `AuthorizationAlreadyConsumedError`.
+  Corruption, verrou indisponible, écriture impossible -> exception :
+  `create_job()` n'est jamais atteint.
+- PAS de transaction commune avec `executed_requests.json` : la
+  consommation est écrite AVANT le marqueur write-ahead. Un arrêt entre
+  les deux brûle l'autorisation sans démarrer l'exécution -- échec
+  fermé assumé (une nouvelle autorisation humaine est requise).
+- Définitive : aucune méthode ne retire une consommation, aucune purge
+  automatique ; le retour arrière du marqueur (refus du Provider) ne
+  touche jamais ce registre.
+- Portée honnête : UNE machine, UN dossier d'état partagé ; aucune
+  garantie multi-machine. Supprimer le fichier à la main rend de
+  nouveau utilisables les autorisations qu'il consignait.
+  `InMemoryAuthorizationConsumptionRegistry` (défaut du store en
+  mémoire) est sûr entre threads d'un même processus mais NE SURVIT PAS
+  à un redémarrage.
+- Non couvert : aucun lien autorisation <-> hashes prompt/avatar/
+  référence visage, aucune identité authentifiée.
 """
 
+import hashlib
 import json
 import os
+import re
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -166,6 +203,44 @@ class ExecutedRequestStoreConflictError(RuntimeError):
     """
 
 
+class AuthorizationAlreadyConsumedError(ExecutedRequestStoreConflictError):
+    """
+    Phase B — l'autorisation présentée a déjà été consommée par une
+    tentative d'exécution antérieure. Levée sous le verrou du registre,
+    avant le marqueur write-ahead, donc avant tout `create_job()`.
+    """
+
+
+class AuthorizationRegistryCorruptedError(ExecutedRequestStoreCorruptedError):
+    """Phase B — registre de consommation illisible ou mal formé.
+    Sous-classe de `ExecutedRequestStoreCorruptedError` : BLOCKED au
+    Gate, jamais APPROVED ; jamais réinitialisé silencieusement."""
+
+
+class AuthorizationRegistryLockTimeoutError(AuthorizationRegistryCorruptedError):
+    """Phase B — verrou du registre non acquis dans le délai (écriture
+    concurrente ou verrou orphelin, jamais supprimé automatiquement)."""
+
+
+class InvalidAuthorizationIdError(ValueError):
+    """Phase B — `authorization_id` absent ou mal formé : refusé avant
+    toute lecture/écriture du registre."""
+
+
+_AUTHORIZATION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+def validate_authorization_id(authorization_id: Any) -> str:
+    if not isinstance(authorization_id, str) or not _AUTHORIZATION_ID_PATTERN.fullmatch(
+        authorization_id
+    ):
+        raise InvalidAuthorizationIdError(
+            f"authorization_id {authorization_id!r} is not a valid identifier "
+            f"(1-128 chars, [A-Za-z0-9._:-], starting alphanumeric)."
+        )
+    return authorization_id
+
+
 def _checked_job_id(job_id: Optional[str]) -> Optional[str]:
     if job_id is not None and (not isinstance(job_id, str) or not job_id):
         raise ValueError(f"job_id must be None or a non-empty str, got {job_id!r}")
@@ -196,6 +271,10 @@ class InMemoryExecutedRequestStore:
     quand aucun store n'est injecté explicitement : garantit que les
     314 tests existants (et tout code appelant `GenerationApprovalGate
     (provider)` sans 3e argument) ne changent pas de comportement.
+
+    Phase B : `authorization_registry` est un registre de consommation
+    EN MÉMOIRE (sûr entre threads, portée limitée au processus) -- il ne
+    fournit AUCUNE consommation durable après redémarrage.
     """
 
     def __init__(self) -> None:
@@ -204,6 +283,7 @@ class InMemoryExecutedRequestStore:
         self._executed_job_ids: Dict[str, str] = {}
         self._unknown_job_ids: Dict[str, str] = {}
         self._in_flight_request_ids: Set[str] = set()
+        self.authorization_registry = InMemoryAuthorizationConsumptionRegistry()
 
     def is_executed(self, request_id: str) -> bool:
         return request_id in self._executed_request_ids
@@ -289,6 +369,12 @@ class FileExecutedRequestStore:
         self.path = Path(path)
         self.lock_path = self.path.with_name(self.path.name + ".lock")
         self.lock_timeout_seconds = lock_timeout_seconds
+        # Phase B : registre de consommation SÉPARÉ, même dossier d'état,
+        # fichier et verrou propres (jamais `executed_requests.json`).
+        self.authorization_registry = FileAuthorizationConsumptionRegistry(
+            self.path.with_name(CONSUMED_AUTHORIZATIONS_FILENAME),
+            lock_timeout_seconds=lock_timeout_seconds,
+        )
 
     @contextmanager
     def _locked(self, context: str, write: bool = False) -> Iterator[None]:
@@ -620,6 +706,201 @@ class FileExecutedRequestStore:
         except BaseException:
             # Phase P3.91 : BaseException (KeyboardInterrupt/SystemExit
             # inclus) -- P3.90 C4 laissait sinon un fichier temporaire.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+
+# ----------------------------------------------------------------------
+# Phase B — registre de consommation des autorisations (cf. docstring
+# de module). Séparé de `executed_requests.json` (invariant P3.89).
+# ----------------------------------------------------------------------
+
+CONSUMED_AUTHORIZATIONS_FILENAME = "consumed_authorizations.json"
+_CONSUMED_REGISTRY_KEY = "consumed_authorization_sha256"
+_SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
+def authorization_id_sha256(authorization_id: str) -> str:
+    """Condensat SHA-256 (hex) d'un `authorization_id` validé : seule
+    forme jamais persistée de l'identifiant."""
+
+    return hashlib.sha256(validate_authorization_id(authorization_id).encode("utf-8")).hexdigest()
+
+
+def _checked_consumer_request_id(request_id: Any) -> str:
+    if not isinstance(request_id, str) or not request_id:
+        raise ValueError(f"request_id must be a non-empty str, got {request_id!r}")
+    return request_id
+
+
+def _already_consumed(digest: str) -> AuthorizationAlreadyConsumedError:
+    return AuthorizationAlreadyConsumedError(
+        f"Authorization (sha256 {digest}) has already been consumed by a "
+        f"prior execution attempt; a new explicit human authorization is "
+        f"required."
+    )
+
+
+class InMemoryAuthorizationConsumptionRegistry:
+    """
+    Registre de consommation EN MÉMOIRE : sûr entre threads d'un même
+    processus (vérification + inscription sous un verrou), mais AUCUNE
+    persistance -- tout est oublié au redémarrage. Réservé aux tests
+    mock-only et au store en mémoire ; jamais une garantie durable.
+    """
+
+    def __init__(self) -> None:
+        self._consumed: Dict[str, Dict[str, str]] = {}
+        self._guard = threading.Lock()
+
+    def is_consumed(self, authorization_id: str) -> bool:
+        digest = authorization_id_sha256(authorization_id)
+        with self._guard:
+            return digest in self._consumed
+
+    def consume(self, authorization_id: str, request_id: str) -> None:
+        digest = authorization_id_sha256(authorization_id)
+        request_id = _checked_consumer_request_id(request_id)
+        with self._guard:
+            if digest in self._consumed:
+                raise _already_consumed(digest)
+            self._consumed[digest] = {
+                "request_id": request_id,
+                "consumed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+
+class FileAuthorizationConsumptionRegistry:
+    """
+    Registre de consommation PERSISTANT, local à une machine et au
+    dossier d'état partagé. Format :
+        {"consumed_authorization_sha256": {"<sha256 hex>":
+            {"request_id": "<id>", "consumed_at": "<iso8601>"}}}
+    Verrou propre (`<path>.lock`, création exclusive, descripteur gardé
+    ouvert pendant toute la section, attente bornée puis
+    `AuthorizationRegistryLockTimeoutError`, verrou orphelin jamais
+    supprimé automatiquement). Aucune méthode de retrait ni de purge.
+    """
+
+    def __init__(self, path: Path, lock_timeout_seconds: float = 10.0) -> None:
+        self.path = Path(path)
+        self.lock_path = self.path.with_name(self.path.name + ".lock")
+        self.lock_timeout_seconds = lock_timeout_seconds
+
+    def is_consumed(self, authorization_id: str) -> bool:
+        """Lecture seule. Registre absent -> `False` sans rien créer ni
+        verrouiller (le dossier d'état n'est jamais touché) ; présent ->
+        lecture sous verrou, fail closed sur tout état illisible."""
+
+        digest = authorization_id_sha256(authorization_id)
+        if not self.path.exists():
+            return False
+        with self._locked(context="is_consumed"):
+            return digest in self._read_or_empty(context="is_consumed")[_CONSUMED_REGISTRY_KEY]
+
+    def consume(self, authorization_id: str, request_id: str) -> None:
+        """Vérifie PUIS inscrit, dans une seule écriture atomique sous le
+        verrou du registre. Déjà consommée -> `AuthorizationAlreadyConsumed
+        Error` sans rien écrire. Toute autre erreur (corruption, verrou,
+        écriture) se propage : l'appelant ne doit jamais poursuivre."""
+
+        digest = authorization_id_sha256(authorization_id)
+        request_id = _checked_consumer_request_id(request_id)
+        with self._locked(context="consume"):
+            data = self._read_or_empty(context="consume")
+            consumed = data[_CONSUMED_REGISTRY_KEY]
+            if digest in consumed:
+                raise _already_consumed(digest)
+            consumed[digest] = {
+                "request_id": request_id,
+                "consumed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._write(data)
+
+    @contextmanager
+    def _locked(self, context: str) -> Iterator[None]:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self.lock_timeout_seconds
+        while True:
+            try:
+                fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except (FileExistsError, PermissionError):
+                if time.monotonic() >= deadline:
+                    raise AuthorizationRegistryLockTimeoutError(
+                        f"[{context}] Authorization consumption registry lock "
+                        f"'{self.lock_path}' could not be acquired within "
+                        f"{self.lock_timeout_seconds}s -- failing closed. An "
+                        f"orphaned lock is never removed automatically; human "
+                        f"review required."
+                    ) from None
+                time.sleep(0.005)
+
+        try:
+            os.write(fd, json.dumps({
+                "pid": os.getpid(),
+                "acquired_at": datetime.now(timezone.utc).isoformat(),
+            }).encode("utf-8"))
+            yield
+        finally:
+            try:
+                os.close(fd)
+            finally:
+                release_deadline = time.monotonic() + _LOCK_RELEASE_RETRY_SECONDS
+                while True:
+                    try:
+                        self.lock_path.unlink()
+                    except PermissionError:
+                        if time.monotonic() < release_deadline:
+                            time.sleep(_LOCK_RELEASE_RETRY_INTERVAL_SECONDS)
+                            continue
+                    except OSError:
+                        pass
+                    break
+
+    def _read_or_empty(self, context: str) -> Dict[str, Any]:
+        if not self.path.exists():
+            return {_CONSUMED_REGISTRY_KEY: {}}
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            raise AuthorizationRegistryCorruptedError(
+                f"[{context}] Authorization consumption registry at "
+                f"'{self.path}' could not be read: {error}"
+            ) from error
+
+        consumed = data.get(_CONSUMED_REGISTRY_KEY) if isinstance(data, dict) else None
+        if not isinstance(consumed, dict) or any(
+            not isinstance(digest, str)
+            or not _SHA256_HEX_PATTERN.fullmatch(digest)
+            or not isinstance(record, dict)
+            or not isinstance(record.get("request_id"), str)
+            or not isinstance(record.get("consumed_at"), str)
+            for digest, record in consumed.items()
+        ):
+            raise AuthorizationRegistryCorruptedError(
+                f"[{context}] Authorization consumption registry at "
+                f"'{self.path}' has an unexpected shape -- failing closed."
+            )
+        return data
+
+    def _write(self, data: Dict[str, Any]) -> None:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.path.parent),
+            prefix=".tmp-consumed-authorizations-",
+            suffix=".json",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, self.path)
+        except BaseException:
             try:
                 os.unlink(tmp_path)
             except OSError:

@@ -35,6 +35,7 @@ from agents.activation_readiness import (
     ActivationReadinessReport,
 )
 from agents.critical_section_lock import FileCriticalSectionLock
+from agents.executed_request_store import FileExecutedRequestStore
 from agents.generation_approval_gate import (
     GenerationApprovalGate,
     GenerationRequest,
@@ -101,7 +102,13 @@ class _WiredStack:
             cost_per_job=cost_per_job, available_credits=available_credits
         )
         self.identity_lock = ReleaseCandidateIdentityLock(C)
-        self.gate = GenerationApprovalGate(self.provider, identity_lock=self.identity_lock)
+        # Phase B : store persistant TEMPORAIRE (la readiness exige une
+        # garantie durable ; jamais le `state/` réel).
+        self.gate = GenerationApprovalGate(
+            self.provider,
+            executed_request_store=FileExecutedRequestStore(tmp_dir / "state" / "executed_requests.json"),
+            identity_lock=self.identity_lock,
+        )
         self.activation_service = RequestScopedActivationService(
             self.gate, self.identity_lock
         )
@@ -375,7 +382,11 @@ class TestO_ProviderReadiness(P2_24_TestCase):
         }
         real_provider = HiggsfieldProvider(client=fake_client)
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(real_provider, identity_lock=identity_lock)
+        gate = GenerationApprovalGate(
+            real_provider,
+            executed_request_store=FileExecutedRequestStore(self._tmp / "state" / "executed_requests.json"),
+            identity_lock=identity_lock,
+        )
         activation_service = RequestScopedActivationService(gate, identity_lock)
         lock = FileCriticalSectionLock(self._tmp)
         job_service = GenerationJobService(
@@ -703,7 +714,14 @@ class TestDirectorReadinessWiring(unittest.TestCase):
         director = AIDirector()
         director.higgsfield = fake_client  # remplace le CLIENT réel avant tout appel
 
-        report = director.check_activation_readiness(_conforming_request())
+        # Phase B : chemins persistants de la chaîne réelle redirigés
+        # vers un dossier temporaire (jamais le `state/` réel).
+        from tests.test_phase_b_authorization_single_use import isolated_director_state
+
+        tmp = Path(tempfile.mkdtemp(prefix="p2_24_director_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with isolated_director_state(tmp):
+            report = director.check_activation_readiness(_conforming_request())
 
         self.assertIsInstance(report, ActivationReadinessReport)
         # Chemin réel : provider_ready doit être False (HiggsfieldProvider réel).

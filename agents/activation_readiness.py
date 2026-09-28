@@ -78,6 +78,12 @@ from agents.activation_contract import (
     RequestScopedActivationService,
 )
 from agents.critical_section_lock import NoOpCriticalSectionLock
+from agents.executed_request_store import (
+    ExecutedRequestStoreCorruptedError,
+    FileAuthorizationConsumptionRegistry,
+    FileExecutedRequestStore,
+    InvalidAuthorizationIdError,
+)
 from agents.generation_approval_gate import (
     GenerationApprovalGate,
     GenerationRequest,
@@ -439,7 +445,37 @@ class ActivationReadinessEvaluator:
                 f"executed -- replay is blocked."
             ]
 
-        return True, []
+        reasons: List[str] = []
+
+        # Phase B : lecture seule -- la readiness ne consomme jamais.
+        auth = request.real_generation_authorization
+        if isinstance(auth, RealGenerationAuthorization):
+            try:
+                consumed = self.gate.is_authorization_consumed(auth.authorization_id)
+            except (ExecutedRequestStoreCorruptedError, InvalidAuthorizationIdError) as error:
+                reasons.append(
+                    f"authorization single-use state could not be verified: {error}"
+                )
+            else:
+                if consumed:
+                    reasons.append(
+                        f"real_generation_authorization '{auth.authorization_id}' "
+                        f"has already been consumed -- a new explicit human "
+                        f"authorization is required."
+                    )
+
+        store = self.gate.executed_request_store
+        if not isinstance(store, FileExecutedRequestStore) or not isinstance(
+            getattr(store, "authorization_registry", None), FileAuthorizationConsumptionRegistry
+        ):
+            reasons.append(
+                "executed_request_store / authorization consumption registry "
+                "is not persistent -- authorization single-use and replay "
+                "protection would not survive a process restart; the durable "
+                "guarantee is unavailable."
+            )
+
+        return (len(reasons) == 0, reasons)
 
     # ------------------------------------------------------------------
     # 10. CRASH_SAFETY -- vérifie que le mécanisme (Phase P2.20) est

@@ -124,7 +124,17 @@ class _Stack:
             cost_per_job=cost_per_job, available_credits=available_credits
         )
         self.identity_lock = ReleaseCandidateIdentityLock(C)
-        self.gate = GenerationApprovalGate(self.provider, identity_lock=self.identity_lock)
+        # Phase B : store persistant TEMPORAIRE propre à ce stack (la
+        # readiness exige une garantie durable ; jamais le `state/` réel).
+        from agents.executed_request_store import FileExecutedRequestStore
+
+        self.gate = GenerationApprovalGate(
+            self.provider,
+            executed_request_store=FileExecutedRequestStore(
+                Path(tempfile.mkdtemp(prefix="state_", dir=tmp_dir)) / "executed_requests.json"
+            ),
+            identity_lock=self.identity_lock,
+        )
         self.activation_service = RequestScopedActivationService(self.gate, self.identity_lock)
         self.provider_activation_service = ControlledRealProviderActivationService(
             self.gate, self.identity_lock, self.activation_service

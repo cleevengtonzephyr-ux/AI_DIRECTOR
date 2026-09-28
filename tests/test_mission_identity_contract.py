@@ -231,7 +231,13 @@ class EndToEndPropagationTests(_MockChainMixin, unittest.TestCase):
         P3.34 did not weaken this guarantee."""
         report_service, gate = self._mock_report_service()
 
+        from agents.executed_request_store import InMemoryAuthorizationConsumptionRegistry
+
         class _BrokenStore:
+            # Phase B : registre de consommation requis par le Gate
+            # (sans lui : BLOCKED, fail closed) -- en mémoire ici.
+            authorization_registry = InMemoryAuthorizationConsumptionRegistry()
+
             def is_executed(self, request_id):
                 return False
 

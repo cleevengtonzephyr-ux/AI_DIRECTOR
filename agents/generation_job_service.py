@@ -561,6 +561,18 @@ class GenerationJobService:
             # Seul `HiggsfieldRealGenerationDisabledError` (refus du
             # Provider AVANT tout appel client) annule CE marqueur ; toute
             # autre sortie par exception laisse la requête UNKNOWN.
+            # Phase B : consommation DÉFINITIVE de l'autorisation approuvée
+            # ci-dessus, dans le registre séparé (jamais executed_requests
+            # .json, invariant P3.89), AVANT le marqueur et `create_job()`.
+            # Pas de transaction commune : un arrêt entre cette écriture et
+            # le marqueur brûle l'autorisation sans exécution (échec
+            # fermé). Identifiant invalide, déjà consommé, registre
+            # absent/illisible/verrouillé, écriture impossible :
+            # exception ici, `create_job()` n'est jamais appelé.
+            self.gate.consume_authorization(
+                request.request_id,
+                getattr(request.real_generation_authorization, "authorization_id", None),
+            )
             with self.gate.in_flight(request.request_id):
                 job = self.provider.create_job(
                     job_type=request.job_type,

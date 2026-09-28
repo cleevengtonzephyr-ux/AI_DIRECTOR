@@ -257,12 +257,19 @@ class TestReadinessAPIPurity(P2_30_TestCase):
                 {"name": "image_references", "type": "array", "required": False},
             ],
         }
+        from tests.test_phase_b_authorization_single_use import isolated_director_state
+
         director = AIDirector()
         director.higgsfield = fake_client
 
         request = self._request()
-        for _ in range(3):
-            report = director.check_activation_readiness(request)
+        # Phase B : chemins persistants de la chaîne réelle redirigés
+        # vers un dossier temporaire (jamais le `state/` réel).
+        tmp = Path(tempfile.mkdtemp(prefix="p2_30_director_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with isolated_director_state(tmp):
+            for _ in range(3):
+                report = director.check_activation_readiness(request)
 
         self.assertFalse(report.budget_ready)  # 1.41 < 67.5
         self.assertFalse(report.provider_ready)  # real provider, always
