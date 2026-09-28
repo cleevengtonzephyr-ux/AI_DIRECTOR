@@ -50,7 +50,7 @@ Les sept conditions suivantes doivent toutes être remplies **avant** qu'une dé
 | Condition | Écart constaté |
 |---|---|
 | 1. Identité authentifiée | Aucun système d'identité : l'autorisation est constructible en mémoire, `note` est un texte libre |
-| 2. Autorisation expirante | `authorized_at` est défini mais jamais vérifié : l'autorisation elle-même n'expire pas (seuls les contrats expirent après 300 s) |
+| 2. Autorisation expirante | Expiration vérifiée depuis Phase B (`GenerationApprovalGate._authorization_freshness_reasons()`) : `authorized_at` absent, invalide, sans fuseau, futur ou âgé de plus de 300 s est refusé, jamais `APPROVED`. Restent ouverts : l'autorisation n'est pas à usage unique (réutilisable pendant 300 s), elle n'est pas liée aux hashes du prompt, de l'avatar ni de la référence visage, et `authorized_at` peut être rempli par défaut à la construction de l'objet |
 | 3. Plafond de crédits | Aucun plafond par requête ni par période : la seule limite serait le solde du compte |
 | 4. `UNKNOWN` toujours bloquant | Aujourd'hui, un coût `UNKNOWN` peut être `APPROVED` si l'approbation et l'autorisation humaine sont toutes deux présentes |
 | 5. Révocation et audit | `revoke()` existe seulement en mémoire, sur le contrat Provider ; aucune révocation du contrat de requête ; aucune révocation persistante ; aucun journal durable des autorisations, préparations, refus et tentatives |
