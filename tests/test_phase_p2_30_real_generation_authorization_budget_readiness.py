@@ -51,6 +51,7 @@ from agents.generation_approval_gate import (
     GenerationApprovalGate,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, video_005_authorization
 from agents.generation_job_service import GenerationJobService
 from agents.release_candidate_identity_lock import (
     ReleaseCandidateIdentityLock,
@@ -143,11 +144,17 @@ class TestRealGenerationAuthorizationStructure(unittest.TestCase):
 
     def test_no_hidden_expiration_field_on_the_authorization_object_itself(self):
         # L'expiration vit dans les CONTRATS (P2.21/P2.26,
-        # max_age_seconds), jamais sur RealGenerationAuthorization
-        # elle-même.
+        # max_age_seconds) et, depuis la Phase B, dans la Gate (âge de
+        # `authorized_at`), jamais dans un champ dédié de
+        # RealGenerationAuthorization. Phase B : seules les trois
+        # empreintes du contenu approuvé s'ajoutent à l'inventaire.
         fields = set(RealGenerationAuthorization.__dataclass_fields__.keys())
         self.assertEqual(
-            fields, {"request_id", "authorized_by_human", "authorization_id", "authorized_at", "note"}
+            fields,
+            {
+                "request_id", "authorized_by_human", "authorization_id", "authorized_at", "note",
+                "prompt_sha256", "avatar_sha256", "face_reference_sha256",
+            },
         )
 
     def test_authorization_is_frozen_immutable(self):
@@ -223,7 +230,7 @@ class TestReadinessAPIPurity(P2_30_TestCase):
             ),
         )
         defaults.update(overrides)
-        return GenerationRequest(**defaults)
+        return bind_request(GenerationRequest(**defaults))
 
     def test_repeated_readiness_evaluations_never_accumulate_state(self):
         provider, gate, activation_service, provider_activation_service, evaluator = self._stack()
@@ -305,9 +312,7 @@ class TestMockFullPositivePath(P2_30_TestCase):
         prepared = director.prepare_real_generation_activation(
             video_id="005", title="t", hook="h", objective="o",
             duration=C.duration, approved=True,
-            real_generation_authorization=RealGenerationAuthorization(
-                request_id="005", authorized_by_human=True
-            ),
+            real_generation_authorization=video_005_authorization(),
             report_service=report_service,
         )
         report = director.execute_real_generation_activation(

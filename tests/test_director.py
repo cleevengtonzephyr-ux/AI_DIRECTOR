@@ -21,8 +21,8 @@ from agents.final_report_service import FinalReportService, FinalReportStatus
 from agents.generation_approval_gate import (
     GenerationApprovalDecision,
     GenerationApprovalGate,
-    RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import video_005_authorization
 from director import AIDirector
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
 from integrations.higgsfield.provider import HiggsfieldProvider
@@ -80,10 +80,7 @@ class TestDirectorRunVideoMissionExecutedPath(unittest.TestCase):
             duration=CONFIRMED_DURATION,
             approved=True,
             # Phase P2.11 : deuxième verrou requis en plus d'`approved`.
-            real_generation_authorization=RealGenerationAuthorization(
-                request_id="005",
-                authorized_by_human=True,
-            ),
+            real_generation_authorization=video_005_authorization(),
             report_service=report_service,
             interval_seconds=0,
         )

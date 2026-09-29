@@ -26,6 +26,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import (
     GenerationJobExecutionError,
     GenerationJobOutcome,
@@ -47,6 +48,7 @@ def _request(**overrides) -> GenerationRequest:
     """
 
     defaults = dict(
+        **content_media(),
         request_id="req-1",
         job_type="seedance_2_0",
         prompt="prompt de test",
@@ -63,7 +65,7 @@ def _request(**overrides) -> GenerationRequest:
             authorized_by_human=True,
         )
 
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 class TestGenerationJobServiceHappyPath(unittest.TestCase):
@@ -231,6 +233,8 @@ class TestGenerationJobServiceNeverBypassesRealProtection(unittest.TestCase):
             "params": [
                 {"name": "prompt", "type": "string", "required": True},
                 {"name": "duration", "type": "integer", "required": False, "default": 5},
+                {"name": "start_image", "type": "object|null", "required": False},
+                {"name": "image_references", "type": "array", "required": False},
             ],
         }
 

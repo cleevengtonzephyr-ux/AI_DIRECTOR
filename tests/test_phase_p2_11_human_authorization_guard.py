@@ -35,6 +35,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from agents.planner import VideoPlanner
 from agents.prompt_assembly_system import PromptAssemblySystem
@@ -46,6 +47,7 @@ from integrations.higgsfield.provider import HiggsfieldProvider
 
 def _request(**overrides) -> GenerationRequest:
     defaults = dict(
+        **content_media(),
         request_id="005",
         job_type="seedance_2_0",
         prompt="prompt de test",
@@ -55,7 +57,7 @@ def _request(**overrides) -> GenerationRequest:
         approved=True,
     )
     defaults.update(overrides)
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 class TestA_NoConsentBlocksEvenWithBudgetAndApproved(unittest.TestCase):
@@ -226,6 +228,8 @@ class TestG_RealProviderStillDisabledRegardlessOfAuthorization(unittest.TestCase
             "params": [
                 {"name": "prompt", "type": "string", "required": True},
                 {"name": "duration", "type": "integer", "required": False, "default": 5},
+                {"name": "start_image", "type": "object|null", "required": False},
+                {"name": "image_references", "type": "array", "required": False},
             ],
         }
 

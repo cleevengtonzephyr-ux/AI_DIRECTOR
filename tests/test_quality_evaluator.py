@@ -25,6 +25,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobOutcome, GenerationJobService
 from agents.quality_evaluator import QualityDecision, QualityEvaluator
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
@@ -65,7 +66,8 @@ class TestQualityEvaluatorPassEndToEnd(unittest.TestCase):
         job_service = GenerationJobService(provider, gate)
         evaluator = QualityEvaluator()
 
-        request = GenerationRequest(
+        request = bind_request(GenerationRequest(
+            **content_media(),
             request_id="req-e2e",
             job_type="seedance_2_0",
             prompt="prompt de test",
@@ -78,7 +80,7 @@ class TestQualityEvaluatorPassEndToEnd(unittest.TestCase):
                 request_id="req-e2e",
                 authorized_by_human=True,
             ),
-        )
+        ))
 
         outcome = job_service.execute(request, interval_seconds=0)
         evaluation = evaluator.evaluate(outcome)

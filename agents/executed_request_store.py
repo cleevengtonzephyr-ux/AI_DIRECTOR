@@ -148,8 +148,9 @@ store est inchangée).
   `InMemoryAuthorizationConsumptionRegistry` (défaut du store en
   mémoire) est sûr entre threads d'un même processus mais NE SURVIT PAS
   à un redémarrage.
-- Non couvert : aucun lien autorisation <-> hashes prompt/avatar/
-  référence visage, aucune identité authentifiée.
+- Le lien autorisation <-> empreintes prompt/avatar/référence visage
+  est vérifié par `GenerationApprovalGate` (jamais stocké ici).
+- Non couvert : aucune identité authentifiée.
 """
 
 import hashlib

@@ -41,6 +41,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import (
     GenerationJobExecutionError,
     GenerationJobService,
@@ -73,6 +74,8 @@ class _ConditionsDegradeBetweenCallsProvider(BaseHiggsfieldProvider):
             params=(
                 ModelParam(name="prompt", type="string", required=True),
                 ModelParam(name="duration", type="integer", required=False, default=5),
+                ModelParam(name="start_image", type="object|null", required=False),
+                ModelParam(name="image_references", type="array", required=False),
             ),
         )
 
@@ -115,7 +118,8 @@ def _request(approved: bool) -> GenerationRequest:
     Gate n'examine l'autorisation.
     """
 
-    return GenerationRequest(
+    return bind_request(GenerationRequest(
+        **content_media(),
         request_id="005",
         job_type=PRODUCTION_MODEL,
         prompt="Un prompt de test.",
@@ -127,7 +131,7 @@ def _request(approved: bool) -> GenerationRequest:
             request_id="005",
             authorized_by_human=True,
         ),
-    )
+    ))
 
 
 class TestGenerationJobServiceReevaluatesAtExecutionTime(unittest.TestCase):

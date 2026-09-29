@@ -71,6 +71,13 @@ coût attendu/décision -- JAMAIS un secret, un token, ni l'objet
 `RealGenerationAuthorization` lui-même (seul `authorization_id`, un
 UUID opaque, est conservé -- même règle que Phase P2.21).
 
+MISE À JOUR (Phase B) : `authorization_id` n'est plus seulement une
+donnée de traçabilité. `prepare()`/`validate()`/`inspect()` exigent
+qu'il soit identique à celui de l'autorisation portée par la requête
+ET à celui du contrat P2.21 apparié (cf.
+`_authorization_binding_violations()`) ; la Gate exige par ailleurs que
+cette autorisation porte les empreintes exactes du contenu.
+
 MISE À JOUR (Phase P2.39) : `avatar_sha256`/`face_reference_sha256`
 étaient auparavant qualifiés de "observabilité seulement" ici (jamais
 comparés à rien) -- un audit (Phase P2.39) a montré que cela laissait
@@ -197,6 +204,17 @@ class ControlledRealProviderActivationService:
         """
 
         reasons = self._fresh_violations(request, request_scoped_contract)
+
+        # Phase B : ce contrat reprendra l'`authorization_id` de la
+        # requête -- le contrat P2.21 fourni doit porter le même, sinon
+        # la paire serait incohérente dès sa création.
+        auth = request.real_generation_authorization
+        if isinstance(auth, RealGenerationAuthorization):
+            reasons.extend(
+                _authorization_binding_violations(
+                    request, request_scoped_contract, auth.authorization_id
+                )
+            )
 
         if reasons:
             raise ControlledRealProviderActivationRejectedError(
@@ -339,6 +357,12 @@ class ControlledRealProviderActivationService:
                 f"to request '{provider_contract.request_id}', not to "
                 f"this request '{request.request_id}'."
             )
+
+        reasons.extend(
+            _authorization_binding_violations(
+                request, request_scoped_contract, provider_contract.authorization_id
+            )
+        )
 
         if provider_contract.request_scoped_activation_id != request_scoped_contract.activation_id:
             reasons.append(
@@ -534,6 +558,43 @@ class ControlledRealProviderActivationService:
             )
 
         return reasons
+
+
+def _authorization_binding_violations(
+    request: GenerationRequest,
+    request_scoped_contract: RequestScopedActivationContract,
+    provider_authorization_id: Optional[str],
+) -> List[str]:
+    """Phase B — `provider_authorization_id` (contrat P2.26) doit être
+    EXACTEMENT l'`authorization_id` de l'autorisation portée par la
+    requête ET celui du contrat P2.21 apparié : ni transférable à une
+    autre autorisation, ni combinable avec un contrat P2.21 préparé
+    sous une autre autorisation."""
+
+    reasons: List[str] = []
+    auth = request.real_generation_authorization
+    request_authorization_id = (
+        auth.authorization_id if isinstance(auth, RealGenerationAuthorization) else None
+    )
+
+    if request_authorization_id is None or provider_authorization_id != request_authorization_id:
+        reasons.append(
+            f"Controlled real-provider activation contract is bound to "
+            f"authorization {provider_authorization_id!r}, not to this "
+            f"request's authorization {request_authorization_id!r} -- not "
+            f"transferable between authorizations."
+        )
+
+    if request_scoped_contract.authorization_id != provider_authorization_id:
+        reasons.append(
+            f"Request-scoped activation contract authorization "
+            f"'{request_scoped_contract.authorization_id}' and controlled "
+            f"real-provider activation contract authorization "
+            f"{provider_authorization_id!r} differ -- the contract pair was "
+            f"not prepared under one single authorization."
+        )
+
+    return reasons
 
 
 def _sha256_of_file_or_none(path: Optional[str]) -> Optional[str]:

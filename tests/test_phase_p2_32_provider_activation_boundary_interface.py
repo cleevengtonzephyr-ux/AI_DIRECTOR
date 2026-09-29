@@ -46,6 +46,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import GenerationJobService
 from agents.release_candidate_identity_lock import (
     ReleaseCandidateIdentityLock,
@@ -92,7 +93,7 @@ def _conforming_request(**overrides) -> GenerationRequest:
         ),
     )
     defaults.update(overrides)
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 class _Stack:

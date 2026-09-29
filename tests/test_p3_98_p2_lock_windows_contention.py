@@ -53,6 +53,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import (
     CriticalStateUnknownAndUnrecordedError,
     GenerationJobExecutionError,
@@ -64,7 +65,8 @@ RID = "005"
 
 
 def _request(request_id=RID) -> GenerationRequest:
-    return GenerationRequest(
+    return bind_request(GenerationRequest(
+        **content_media(),
         request_id=request_id,
         job_type="seedance_2_0",
         prompt="Un prompt de test suffisamment explicite.",
@@ -73,7 +75,7 @@ def _request(request_id=RID) -> GenerationRequest:
         real_generation_authorization=RealGenerationAuthorization(
             request_id=request_id, authorized_by_human=True
         ),
-    )
+    ))
 
 
 class _HookedProvider(MockHiggsfieldProvider):

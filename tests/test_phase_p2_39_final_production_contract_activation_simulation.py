@@ -52,6 +52,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import (
     CriticalStateUnknownAndUnrecordedError,
     GenerationJobService,
@@ -110,7 +111,7 @@ def _conforming_request(**overrides) -> GenerationRequest:
         ),
     )
     defaults.update(overrides)
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 class _Stack:
@@ -462,11 +463,12 @@ class Test16_AuthorizationMutations(_TmpDirTestCase):
             stack.activation_service.prepare_activation(request)
 
     def test_C_authorization_expired_no_field_exists_so_use_p2_21_contract_expiry_instead(self):
-        """`RealGenerationAuthorization` porte volontairement AUCUN
-        champ d'expiration propre (P2.30, re-confirmé P2.38) --
-        l'expiration est une propriété du CONTRAT P2.21/P2.26, jamais
-        de l'autorisation. Ce test démontre donc l'expiration au niveau
-        où elle existe réellement."""
+        """`RealGenerationAuthorization` ne porte aucun champ
+        d'expiration dédié (P2.30, re-confirmé P2.38). Depuis la Phase B
+        la Gate refuse une autorisation dont `authorized_at` dépasse
+        300 s (cf. tests/test_phase_b_authorization_expiry.py) ; ce test
+        démontre l'expiration au niveau du CONTRAT P2.21, qui reste un
+        filet de sécurité distinct."""
 
         stack = self._stack()
         request = _conforming_request()
@@ -524,22 +526,15 @@ class Test17_ContractMutations(_TmpDirTestCase):
             reasons = stack.provider_activation_service.inspect(request, rs, bad_pa)
             self.assertTrue(reasons, f"expected rejection for mutated {field_name}")
 
-    def test_authorization_id_is_traceability_only_not_a_security_boundary(self):
-        """Étape 16 (rapport P2.39) : contrairement à request_id/job_type/
-        duration/resolution/aspect_ratio/prompt/avatar/face (tous
-        re-vérifiés contre la requête live, cf. test ci-dessus),
-        `authorization_id` reste délibérément NON re-vérifié ici -- il
-        n'a jamais été, et ne peut pas être, une frontière de sécurité :
-        `RealGenerationAuthorization` n'a aucun mécanisme de révocation
-        propre (confirmé par P2.30 :
-        test_no_module_level_registry_of_authorizations_anywhere), donc
-        TOUTE autorisation valide (authorized_by_human=True, request_id
-        correspondant -- re-vérifiées fraîchement par _fresh_violations()
-        à chaque appel) accorde une autorité STRICTEMENT ÉQUIVALENTE
-        pour cette requête, quel que soit son authorization_id précis.
-        Ce champ reste un identifiant de traçabilité opaque, jamais une
-        preuve d'autorité (cf. docstring de
-        ControlledRealProviderActivationContract, inchangé)."""
+    def test_authorization_id_mismatch_is_rejected(self):
+        """Étape 16 (rapport P2.39) décrivait `authorization_id` comme
+        une simple donnée de traçabilité, jamais re-vérifiée. Depuis la
+        Phase B, il est la clé du registre d'usage unique : un contrat
+        P2.26 dont `authorization_id` diffère de l'autorisation portée
+        par la requête (et du contrat P2.21 apparié) est désormais
+        REFUSÉ -- sinon une paire préparée sous une autorisation A
+        pourrait être exécutée sous une autorisation B, en ne consommant
+        que B."""
 
         stack = self._stack()
         request = _conforming_request()
@@ -547,7 +542,19 @@ class Test17_ContractMutations(_TmpDirTestCase):
 
         bad_pa = pa.__class__(**{**pa.__dict__, "authorization_id": "not-the-real-auth-id"})
         reasons = stack.provider_activation_service.inspect(request, rs, bad_pa)
-        self.assertEqual(reasons, [])
+        self.assertTrue(
+            any("not-the-real-auth-id" in reason for reason in reasons), reasons
+        )
+        self.assertTrue(
+            any("contract pair was not prepared under one single authorization" in reason for reason in reasons),
+            reasons,
+        )
+        with self.assertRaises(ControlledRealProviderActivationRejectedError):
+            stack.provider_activation_service.validate(request, rs, bad_pa)
+        self.assertEqual(len(stack.provider._jobs), 0)
+        self.assertFalse(
+            stack.gate.is_authorization_consumed(request.real_generation_authorization.authorization_id)
+        )
 
     def test_expiry_revoke_consumed(self):
         stack = self._stack()

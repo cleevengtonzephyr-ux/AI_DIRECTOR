@@ -54,6 +54,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
@@ -97,14 +98,15 @@ def _auth(request_id=RID, authorization_id=None):
 
 
 def _request(auth=None, request_id=RID, approved=True):
-    return GenerationRequest(
+    return bind_request(GenerationRequest(
+        **content_media(),
         request_id=request_id,
         job_type="seedance_2_0",
         prompt="Un prompt de test suffisamment explicite.",
         duration=5,
         approved=approved,
         real_generation_authorization=auth if auth is not None else _auth(request_id),
-    )
+    ))
 
 
 def _digest(authorization_id):
@@ -224,7 +226,7 @@ class TestReadsNeverConsume(_Sandbox):
         from integrations.higgsfield.types import MediaReference
 
         auth = _auth(C.request_id)
-        request = GenerationRequest(
+        request = bind_request(GenerationRequest(
             request_id=C.request_id, job_type=C.job_type,
             prompt=PromptAssemblySystem(PROJECT_ROOT).assemble(C.request_id),
             duration=C.duration, resolution=C.resolution, aspect_ratio=C.aspect_ratio,
@@ -240,7 +242,7 @@ class TestReadsNeverConsume(_Sandbox):
                 sha256=None,
             ),),
             real_generation_authorization=auth,
-        )
+        ))
         provider = _CountingProvider(cost_per_job=67.5, available_credits=100.0)
         identity_lock = ReleaseCandidateIdentityLock(C)
         gate = GenerationApprovalGate(provider, executed_request_store=self._store(), identity_lock=identity_lock)
@@ -406,6 +408,8 @@ class TestConsumptionIsNeverUndone(_Sandbox):
             "params": [
                 {"name": "prompt", "type": "string", "required": True},
                 {"name": "duration", "type": "integer", "required": False, "default": 5},
+                {"name": "start_image", "type": "object|null", "required": False},
+                {"name": "image_references", "type": "array", "required": False},
             ],
         }
         provider = HiggsfieldProvider(client=client)

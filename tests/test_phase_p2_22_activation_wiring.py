@@ -46,6 +46,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import (
     GenerationJobActivationRejectedError,
     GenerationJobExecutionError,
@@ -96,7 +97,7 @@ def _conforming_request(**overrides) -> GenerationRequest:
         ),
     )
     defaults.update(overrides)
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 def _valid_auth(request_id=None) -> RealGenerationAuthorization:

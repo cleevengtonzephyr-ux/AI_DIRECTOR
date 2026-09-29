@@ -22,8 +22,8 @@ from agents.final_report_service import FinalReportService, FinalReportStatus
 from agents.generation_approval_gate import (
     GenerationApprovalDecision,
     GenerationApprovalGate,
-    RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import video_005_authorization
 from agents.task_manager import TaskManager, TaskStatus
 from director import AIDirector
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
@@ -132,10 +132,7 @@ class TestTaskManagerProcessExecutedOutcomes(unittest.TestCase):
             director,
             approved=True,
             # Phase P2.11 : deuxième verrou requis en plus d'`approved`.
-            real_generation_authorization=RealGenerationAuthorization(
-                request_id=task.video_id,
-                authorized_by_human=True,
-            ),
+            real_generation_authorization=video_005_authorization(request_id=task.video_id),
             report_service=report_service,
             interval_seconds=0,
         )
@@ -199,6 +196,8 @@ class TestTaskManagerNeverSwallowsRealProtection(unittest.TestCase):
             "params": [
                 {"name": "prompt", "type": "string", "required": True},
                 {"name": "duration", "type": "integer", "required": False, "default": 5},
+                {"name": "start_image", "type": "object|null", "required": False},
+                {"name": "image_references", "type": "array", "required": False},
                 # start_image/image_references (Phase P2.7) : le VRAI
                 # schéma seedance_2_0 les déclare (cf. REAL_SEEDANCE_SCHEMA,
                 # tests/test_phase_p1_readiness.py). AIDirector attache
@@ -235,10 +234,7 @@ class TestTaskManagerNeverSwallowsRealProtection(unittest.TestCase):
                 # vérifier ; il vérifie spécifiquement que même
                 # APPROVED (budget + approved + autorisation humaine)
                 # n'atteint jamais une génération réelle.
-                real_generation_authorization=RealGenerationAuthorization(
-                    request_id=task.video_id,
-                    authorized_by_human=True,
-                ),
+                real_generation_authorization=video_005_authorization(request_id=task.video_id),
                 report_service=report_service,
             )
 
