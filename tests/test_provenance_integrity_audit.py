@@ -63,7 +63,8 @@ from agents.controlled_activation_composition import (
 from agents.controlled_real_provider_activation import ControlledRealProviderActivationService
 from agents.critical_section_lock import FileCriticalSectionLock
 from agents.final_report_service import FinalReportService
-from agents.generation_approval_gate import GenerationApprovalGate, RealGenerationAuthorization
+from agents.generation_approval_gate import GenerationApprovalGate
+from tests.authorization_content_helpers import video_005_authorization
 from agents.generation_job_service import GenerationJobService
 from agents.human_authorization_handoff import HumanAuthorizationHandoffBuilder, HumanAuthorizationHandoffInput
 from agents.planner import VideoPlanner
@@ -106,7 +107,7 @@ def _real_script_artifact(mission_id: str):
 
 
 def _valid_auth(request_id="005"):
-    return RealGenerationAuthorization(request_id=request_id, authorized_by_human=True)
+    return video_005_authorization(request_id=request_id)
 
 
 def _full_chain(mission_id: str, request_id="005"):

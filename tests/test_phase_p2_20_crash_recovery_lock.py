@@ -57,6 +57,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import (
     CriticalStateUnknownAndUnrecordedError,
     GenerationJobExecutionError,
@@ -74,6 +75,7 @@ CONFIRMED_DURATION = 5
 
 def _request(request_id="005", **overrides) -> GenerationRequest:
     defaults = dict(
+        **content_media(),
         request_id=request_id,
         job_type="seedance_2_0",
         prompt="Un prompt de test suffisamment explicite.",
@@ -84,7 +86,7 @@ def _request(request_id="005", **overrides) -> GenerationRequest:
         ),
     )
     defaults.update(overrides)
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 def _gate(cost_per_job=10.0, available_credits=100.0, store=None):
@@ -590,6 +592,8 @@ class TestM_RealProviderStaysDisabledWithLock(unittest.TestCase):
             "params": [
                 {"name": "prompt", "type": "string", "required": True},
                 {"name": "duration", "type": "integer", "required": False, "default": 5},
+                {"name": "start_image", "type": "object|null", "required": False},
+                {"name": "image_references", "type": "array", "required": False},
             ],
         }
 

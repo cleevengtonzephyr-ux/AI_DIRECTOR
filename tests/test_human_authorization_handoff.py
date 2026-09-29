@@ -30,6 +30,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from agents.asset_preparation_system import AssetPreparationSystem
 from agents.content_agent import ContentAgent, ContentAgentInput
 from agents.generation_approval_gate import GenerationApprovalGate, RealGenerationAuthorization
+from tests.authorization_content_helpers import video_005_authorization
 from agents.human_authorization_handoff import (
     HumanAuthorizationFailureCategory,
     HumanAuthorizationHandoff,
@@ -129,7 +130,7 @@ def _rejected_intake():
 
 
 def _valid_auth(request_id="005"):
-    return RealGenerationAuthorization(request_id=request_id, authorized_by_human=True)
+    return video_005_authorization(request_id=request_id)
 
 
 def _findings_by_dimension(handoff):

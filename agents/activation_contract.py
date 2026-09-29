@@ -91,7 +91,8 @@ ici.
 NE PERSISTE JAMAIS `RealGenerationAuthorization` (règle absolue
 P2.21) : le contrat ne porte que `authorization_id` (identifiant
 opaque généré par `RealGenerationAuthorization.authorization_id`, pas
-un secret, à seule fin de traçabilité) -- jamais l'objet
+un secret ; Phase B : comparé à l'autorisation de la requête à chaque
+validation, cf. `_activation_violations()`) -- jamais l'objet
 d'autorisation lui-même, jamais `authorized_by_human`, jamais de note
 libre.
 
@@ -196,10 +197,12 @@ class RequestScopedActivationContract:
     ni décision d'approbation figée (celle-ci est toujours
     RE-vérifiée, jamais relue depuis ce contrat).
 
-    `authorization_id` est un identifiant opaque (UUID) porté par
-    `RealGenerationAuthorization.authorization_id` -- pas un secret,
-    uniquement pour traçabilité (qui a autorisé cette activation
-    précise). `prompt_sha256` sert de vérification de cohérence
+    `authorization_id` est l'identifiant opaque (UUID) porté par
+    `RealGenerationAuthorization.authorization_id` -- pas un secret.
+    Phase B : il LIE le contrat à cette autorisation précise ;
+    `validate_activation()`/`inspect_activation()` refusent le contrat
+    si la requête porte une autre autorisation (même valide pour le
+    même request_id). `prompt_sha256` sert de vérification de cohérence
     supplémentaire (Étape 6), jamais de source de vérité (l'Identity
     Lock reste seul juge de la conformité réelle du prompt).
     """
@@ -449,6 +452,23 @@ class RequestScopedActivationService:
                 f"Activation contract '{contract.activation_id}' has "
                 f"expired ({self.max_age_seconds}s max age) -- call "
                 f"prepare_activation() again for a fresh contract."
+            )
+
+        # Phase B : le contrat n'est valable que pour l'autorisation
+        # EXACTE dont il a été préparé -- jamais transférable à une
+        # autre autorisation, même valide pour le même request_id.
+        auth = request.real_generation_authorization
+        request_authorization_id = (
+            auth.authorization_id
+            if isinstance(auth, RealGenerationAuthorization)
+            else None
+        )
+        if request_authorization_id is None or contract.authorization_id != request_authorization_id:
+            reasons.append(
+                f"Activation contract is bound to authorization "
+                f"'{contract.authorization_id}', not to this request's "
+                f"authorization {request_authorization_id!r} -- not "
+                f"transferable between authorizations."
             )
 
         actual_prompt_sha256 = hashlib.sha256(

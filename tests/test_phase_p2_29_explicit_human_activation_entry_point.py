@@ -57,6 +57,7 @@ from agents.generation_approval_gate import (
     GenerationApprovalGate,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import video_005_authorization
 from agents.generation_job_service import GenerationJobService
 from agents.release_candidate_identity_lock import (
     ReleaseCandidateIdentityLock,
@@ -72,9 +73,7 @@ CONFIRMED_DURATION = 15
 
 
 def _valid_auth(request_id=None):
-    return RealGenerationAuthorization(
-        request_id=request_id or C.request_id, authorized_by_human=True
-    )
+    return video_005_authorization(request_id=request_id or C.request_id)
 
 
 def _fake_client(cost=67.5, balance=100.0):

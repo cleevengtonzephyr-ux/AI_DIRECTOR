@@ -21,8 +21,9 @@ from agents.final_report_service import FinalReportService, FinalReportStatus
 from agents.generation_approval_gate import (
     GenerationApprovalDecision,
     GenerationApprovalGate,
-    RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bound_authorization
+from agents.asset_preparation_system import AssetPreparationSystem
 from agents.planner import VideoPlanner
 from agents.prompt_assembly_system import PromptAssemblySystem
 from agents.video_agent import DEFAULT_JOB_TYPE, VideoAgent
@@ -166,8 +167,15 @@ class TestVideoAgentRun(unittest.TestCase):
         )
         gate = GenerationApprovalGate(provider)
         report_service = FinalReportService(provider, gate)
-        agent = VideoAgent()
+        # Phase B : l'autorisation doit être liée au contenu exact
+        # (prompt + avatar + référence visage) -- l'agent puise donc
+        # les assets réels (lecture seule), et l'autorisation est liée
+        # à la requête qu'il construira.
+        agent = VideoAgent(asset_preparation=AssetPreparationSystem(PROJECT_ROOT))
         plan = _build_plan_with_confirmed_duration()
+        authorization = bound_authorization(
+            agent.build_request(plan, prompt="p", approved=True)
+        )
 
         report = agent.run(
             plan,
@@ -175,10 +183,7 @@ class TestVideoAgentRun(unittest.TestCase):
             prompt="p",
             approved=True,
             # Phase P2.11 : deuxième verrou requis en plus d'`approved`.
-            real_generation_authorization=RealGenerationAuthorization(
-                request_id=plan.video_id,
-                authorized_by_human=True,
-            ),
+            real_generation_authorization=authorization,
             interval_seconds=0,
         )
 

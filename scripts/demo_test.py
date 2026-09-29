@@ -31,6 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agents.final_report_service import FinalReport, FinalReportService, FinalReportStatus
 from agents.generation_approval_gate import GenerationApprovalGate, RealGenerationAuthorization
+from agents.release_candidate_identity_lock import VIDEO_005_RELEASE_CANDIDATE
 from agents.task_manager import TaskManager
 from director import AIDirector
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
@@ -115,10 +116,16 @@ def run_demo() -> Dict[str, FinalReport]:
         # (aucune génération réelle) : ne pas reproduire cette
         # construction pour un run réel sans un consentement humain
         # authentique en amont.
+        # Phase B : l'autorisation est liée au contenu approuvé exact
+        # (empreintes canoniques de Video 005, que l'Identity Lock exige
+        # déjà) -- jamais recalculée ni devinée par le Director.
         real_generation_authorization=RealGenerationAuthorization(
             request_id=task_2.video_id,
             authorized_by_human=True,
             note="scripts/demo_test.py Scenario 2 — MockHiggsfieldProvider only.",
+            prompt_sha256=VIDEO_005_RELEASE_CANDIDATE.prompt_sha256,
+            avatar_sha256=VIDEO_005_RELEASE_CANDIDATE.avatar_master_sha256,
+            face_reference_sha256=VIDEO_005_RELEASE_CANDIDATE.face_reference_sha256,
         ),
         report_service=report_service_ok,
         interval_seconds=0,

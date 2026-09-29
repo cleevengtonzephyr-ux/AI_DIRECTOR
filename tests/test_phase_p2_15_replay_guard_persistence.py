@@ -36,6 +36,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
@@ -44,6 +45,7 @@ from integrations.higgsfield.provider import HiggsfieldProvider
 
 def _request(**overrides) -> GenerationRequest:
     defaults = dict(
+        **content_media(),
         request_id="005",
         job_type="seedance_2_0",
         prompt="prompt de test",
@@ -53,7 +55,7 @@ def _request(**overrides) -> GenerationRequest:
         approved=True,
     )
     defaults.update(overrides)
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 def _valid_auth(request_id="005") -> RealGenerationAuthorization:
@@ -226,6 +228,8 @@ class TestI_RealProviderStillDisabled(_FilePersistenceTestCase):
             "params": [
                 {"name": "prompt", "type": "string", "required": True},
                 {"name": "duration", "type": "integer", "required": False, "default": 5},
+                {"name": "start_image", "type": "object|null", "required": False},
+                {"name": "image_references", "type": "array", "required": False},
             ],
         }
 

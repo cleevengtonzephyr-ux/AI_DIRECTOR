@@ -47,6 +47,7 @@ from agents.generation_approval_gate import (
     GenerationApprovalGate,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, video_005_authorization
 from agents.generation_job_service import GenerationJobService
 from agents.release_candidate_identity_lock import (
     ReleaseCandidateIdentityLock,
@@ -118,7 +119,7 @@ class TestRealDirectorWiringEndToEnd(P2_28_TestCase):
             ),
         )
         defaults.update(overrides)
-        return GenerationRequest(**defaults)
+        return bind_request(GenerationRequest(**defaults))
 
     def test_real_director_chain_supports_full_mock_positive_scenario(self):
         director = AIDirector()
@@ -193,7 +194,7 @@ class TestRealDirectorWiringEndToEnd(P2_28_TestCase):
 
         director = AIDirector()
         director.higgsfield = _fake_client(cost=10.0, balance=100.0)
-        authorization = RealGenerationAuthorization(request_id="005", authorized_by_human=True)
+        authorization = video_005_authorization()
 
         with isolated_director_state(self._tmp) as isolated_state:
             report = director.check_activation_readiness(self._real_request())
@@ -309,7 +310,7 @@ class TestFinalReportAxisIndependence(P2_28_TestCase):
             ),
         )
         defaults.update(overrides)
-        return GenerationRequest(**defaults)
+        return bind_request(GenerationRequest(**defaults))
 
     def test_case_gate_rejected_all_activation_axes_not_evaluated(self):
         _, _, _, _, report_service = self._stack(cost_per_job=67.5, available_credits=1.41)

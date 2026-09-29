@@ -50,6 +50,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobService
 
 
@@ -250,11 +251,12 @@ class TestAuthorizedP2PathUnderTheLock(_LockedClientCase):
     reaches the real Client for its READS; creation stops at the Provider."""
 
     def _authorized_request(self, request_id="p383-authorized"):
-        return GenerationRequest(
+        return bind_request(GenerationRequest(
+            **content_media(),
             request_id=request_id, job_type="seedance_2_0", prompt="P", duration=15, resolution="720p",
             aspect_ratio="9:16", approved=True,
             real_generation_authorization=RealGenerationAuthorization(authorized_by_human=True, request_id=request_id),
-        )
+        ))
 
     def test_authorized_request_reads_through_the_real_client_and_creation_stays_closed(self):
         provider = HiggsfieldProvider(client=HiggsfieldClient())

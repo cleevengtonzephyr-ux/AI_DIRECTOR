@@ -25,6 +25,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
 
@@ -42,7 +43,8 @@ def _issued(seconds_ago):
 
 
 def _request(auth, approved=True, request_id="005"):
-    return GenerationRequest(
+    return bind_request(GenerationRequest(
+        **content_media(),
         request_id=request_id,
         job_type="seedance_2_0",
         prompt="prompt de test",
@@ -51,7 +53,7 @@ def _request(auth, approved=True, request_id="005"):
         aspect_ratio="9:16",
         approved=approved,
         real_generation_authorization=auth,
-    )
+    ))
 
 
 def _gate(provider=None):

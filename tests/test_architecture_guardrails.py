@@ -57,6 +57,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import GenerationJobService
 from agents.human_authorization_handoff import HumanAuthorizationHandoffStatus
 from agents.production_activation_handoff import ProductionActivationHandoffStatus
@@ -87,7 +88,7 @@ def _conforming_request(**overrides) -> GenerationRequest:
         real_generation_authorization=RealGenerationAuthorization(request_id=C.request_id, authorized_by_human=True),
     )
     defaults.update(overrides)
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 # ------------------------------------------------------------------

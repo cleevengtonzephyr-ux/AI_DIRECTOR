@@ -41,7 +41,10 @@ IMPORTANT — séparation stricte des responsabilités :
   APPROVED n'est désormais jamais renvoyé sans une autorisation
   explicite, valide, et liée au `request_id` exact — ni le budget, ni
   `approved=True` seul, ni un dry-run, ni un cache ne peuvent la
-  produire (cf. `_human_authorization_reasons()`).
+  produire (cf. `_human_authorization_reasons()`). Phase B : elle doit
+  aussi porter les empreintes exactes du prompt, de l'avatar et de la
+  référence visage réellement évalués (cf.
+  `_authorization_content_reasons()`).
 - La CRÉATION RÉELLE DU JOB n'est JAMAIS effectuée ici. Ce module
   n'importe ni HiggsfieldClient, ni subprocess, et n'appelle jamais
   `create_job()`.
@@ -62,6 +65,8 @@ réelles. Une lecture d'état corrompue échoue TOUJOURS fermée
 (BLOCKED), jamais vers APPROVED ni vers un silencieux "non exécuté".
 """
 
+import hashlib
+import re
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -87,7 +92,10 @@ from agents.generation_cost_service import (
     GenerationCostService,
 )
 from agents.production_model import PRODUCTION_MODEL
-from agents.release_candidate_identity_lock import ReleaseCandidateIdentityLock
+from agents.release_candidate_identity_lock import (
+    ReleaseCandidateIdentityLock,
+    _sha256_of_file,
+)
 from integrations.higgsfield.errors import HiggsfieldError
 from integrations.higgsfield.provider import BaseHiggsfieldProvider
 from integrations.higgsfield.types import MediaReference
@@ -162,11 +170,25 @@ class RealGenerationAuthorization:
     et le Gate vérifie littéralement `is True`, pas une simple valeur
     "truthy".
 
+    Liée au CONTENU approuvé (Phase B) : `prompt_sha256`/`avatar_sha256`/
+    `face_reference_sha256` sont les empreintes SHA-256 (hex minuscule)
+    du prompt (UTF-8) et des fichiers avatar (`start_image.source`) et
+    référence visage (premier `image_references` de rôle
+    "face_reference") que l'humain a approuvés -- même format que
+    l'Identity Lock, les contrats P2.21/P2.26 et le Provider (cf.
+    `authorization_content_digests()`). Elles restent `None` par défaut
+    pour que les constructeurs existants restent valides, mais la Gate
+    refuse toute autorisation dont une empreinte est absente, mal formée
+    ou différente du contenu réellement évalué
+    (`GenerationApprovalGate._authorization_content_reasons`).
+
     Le projet ne possède pas de système d'identité utilisateur : `note`
     reste un champ texte libre, optionnel, jamais rempli
     automatiquement — à l'appelant humain d'y consigner un contexte
     réel (qui a autorisé, par quel canal) s'il le souhaite. Aucune
-    identité n'est inventée ici.
+    identité n'est inventée ici, et aucune n'est authentifiée : une
+    autorisation liée au contenu prouve la COHÉRENCE de ce qui sera
+    exécuté, jamais QUI a consenti.
     """
 
     request_id: str
@@ -176,6 +198,60 @@ class RealGenerationAuthorization:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     note: str = ""
+    prompt_sha256: Optional[str] = None
+    avatar_sha256: Optional[str] = None
+    face_reference_sha256: Optional[str] = None
+
+
+AUTHORIZATION_CONTENT_DIGEST_FIELDS: Tuple[str, ...] = (
+    "prompt_sha256",
+    "avatar_sha256",
+    "face_reference_sha256",
+)
+
+_SHA256_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def _media_file_sha256_or_none(reference) -> Optional[str]:
+    source = getattr(reference, "source", None)
+    if not isinstance(source, str) or not source:
+        return None
+    return _sha256_of_file(source)
+
+
+def authorization_content_digests(request: "GenerationRequest") -> dict:
+    """
+    Phase B — empreintes SHA-256 LIVE du contenu que `request` enverrait
+    au Provider : prompt (UTF-8), fichier `start_image.source`, fichier
+    du premier `image_references` de rôle "face_reference". Mêmes
+    règles que `GenerationJobService` (valeurs transmises au Provider),
+    `ControlledRealProviderActivationService` et l'Identity Lock (même
+    fonction de hachage de fichier). `None` pour toute valeur absente
+    ou illisible -- jamais une valeur inventée.
+
+    Fonction PURE en lecture : ne construit jamais de
+    `RealGenerationAuthorization` (seul un appelant explicite le peut)
+    et ne décide rien ; la Gate s'en sert pour comparer.
+    """
+
+    prompt = request.prompt
+    face_reference = next(
+        (
+            ref
+            for ref in (request.image_references or ())
+            if getattr(ref, "role", None) == "face_reference"
+        ),
+        None,
+    )
+    return {
+        "prompt_sha256": (
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            if isinstance(prompt, str)
+            else None
+        ),
+        "avatar_sha256": _media_file_sha256_or_none(request.start_image),
+        "face_reference_sha256": _media_file_sha256_or_none(face_reference),
+    }
 
 
 @dataclass(frozen=True)
@@ -383,6 +459,7 @@ class GenerationApprovalGate:
                 )
 
             reasons.extend(self._human_authorization_reasons(request))
+            reasons.extend(self._authorization_content_reasons(request))
             reasons.extend(consumption_reasons)
 
             if reasons:
@@ -454,6 +531,7 @@ class GenerationApprovalGate:
             )
 
         reasons.extend(self._human_authorization_reasons(request))
+        reasons.extend(self._authorization_content_reasons(request))
         reasons.extend(consumption_reasons)
 
         if reasons:
@@ -683,6 +761,50 @@ class GenerationApprovalGate:
                 f"{age_seconds:.0f}s ago, max {self.MAX_AUTHORIZATION_AGE_SECONDS:.0f}s."
             ]
         return []
+
+    def _authorization_content_reasons(self, request: GenerationRequest) -> List[str]:
+        """
+        Phase B : l'autorisation doit porter les empreintes EXACTES du
+        prompt, de l'avatar et de la référence visage de CETTE requête,
+        recalculées ici depuis le contenu réel (fichiers relus sur
+        disque). Empreinte absente ou mal formée, référence absente,
+        fichier illisible ou divergence -> refus (jamais APPROVED, donc
+        ni consommation ni `create_job()`).
+
+        Séparée de `_human_authorization_reasons()` (qui reste
+        l'unique juge de la présence/validité de l'autorisation) :
+        liste vide si l'autorisation n'est pas une instance valide,
+        déjà refusée là-bas. Ne lit jamais le store.
+        """
+
+        auth = request.real_generation_authorization
+        if not isinstance(auth, RealGenerationAuthorization):
+            return []
+
+        live = authorization_content_digests(request)
+        reasons: List[str] = []
+        for name in AUTHORIZATION_CONTENT_DIGEST_FIELDS:
+            declared = getattr(auth, name)
+            actual = live[name]
+            if not isinstance(declared, str) or not _SHA256_HEX_DIGEST.fullmatch(declared):
+                reasons.append(
+                    f"real_generation_authorization.{name} is missing or not a "
+                    f"lowercase SHA-256 hex digest ({declared!r}) -- the "
+                    f"authorization is not bound to the approved content."
+                )
+            elif actual is None:
+                reasons.append(
+                    f"real_generation_authorization.{name} cannot be verified: "
+                    f"the corresponding content of request "
+                    f"'{request.request_id}' is missing or unreadable."
+                )
+            elif declared != actual:
+                reasons.append(
+                    f"real_generation_authorization.{name} '{declared}' does not "
+                    f"match this request's live content digest '{actual}' -- "
+                    f"the authorization was given for different content."
+                )
+        return reasons
 
     # ------------------------------------------------------------------
     # VALIDATION

@@ -59,6 +59,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import GenerationJobService
 from agents.production_activation_readiness_certificate import (
     ProductionActivationReadinessCertificate,
@@ -205,7 +206,7 @@ class TestRuntimeBoundary(unittest.TestCase):
             real_generation_authorization=RealGenerationAuthorization(request_id=C.request_id, authorized_by_human=True),
         )
         values.update(overrides)
-        return GenerationRequest(**values)
+        return bind_request(GenerationRequest(**values))
 
     def _chain(self):
         provider = MockHiggsfieldProvider(cost_per_job=67.5, available_credits=1000.0)

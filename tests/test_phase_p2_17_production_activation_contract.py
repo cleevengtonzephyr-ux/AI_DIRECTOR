@@ -48,6 +48,11 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import (
+    bind_request,
+    content_media,
+    video_005_authorization,
+)
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from agents.planner import VideoPlanner
 from agents.production_model import PRODUCTION_MODEL
@@ -172,7 +177,7 @@ def _build_real_video_005_request(**overrides) -> GenerationRequest:
         request_dict.update(overrides)
         request = GenerationRequest(**request_dict)
 
-    return request
+    return bind_request(request)
 
 
 def _valid_auth(request_id=CONTRACT_REQUEST_ID) -> RealGenerationAuthorization:
@@ -280,9 +285,11 @@ class TestE_ReplayRefusedEvenWithFreshValidAuthorization(unittest.TestCase):
 
 class TestF_TamperedPromptViolatesContract(unittest.TestCase):
     """F — un Master Prompt différent de la Release Candidate viole le
-    contrat d'identité (détecté par _contract_violations ; NON détecté
-    par le Gate lui-même aujourd'hui -- écart documenté dans le
-    rapport P2.17, Objectif 7)."""
+    contrat d'identité (détecté par _contract_violations). L'écart
+    documenté en P2.17 (Objectif 7 : le Gate sans Identity Lock ne
+    regardait jamais le prompt) est fermé en Phase B : l'autorisation
+    porte l'empreinte du contenu approuvé, et le Gate refuse un prompt
+    qu'elle ne couvre pas."""
 
     def test_tampered_prompt_hash_detected_as_violation(self):
         _, assets_by_role = _real_video_005_prompt_and_assets()
@@ -292,16 +299,15 @@ class TestF_TamperedPromptViolatesContract(unittest.TestCase):
 
         self.assertTrue(any("sha256" in v for v in violations))
 
-    def test_gate_itself_does_not_check_prompt_identity(self):
-        # Documente l'écart : le Gate approuve sur la base du
-        # coût/budget/autorisation/replay, jamais du contenu du
-        # prompt -- ce n'est PAS un bug de cette phase, c'est une
-        # limite structurelle actuelle à corriger dans une future
-        # phase d'activation si le contrat l'exige.
+    def test_gate_refuses_prompt_not_covered_by_the_authorization(self):
+        # Phase B : même SANS Identity Lock, le Gate compare le prompt
+        # réellement évalué à l'empreinte portée par l'autorisation
+        # humaine (donnée ici pour le Master Prompt réel de Video 005).
         provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=100.0)
         gate = GenerationApprovalGate(provider)
 
         tampered_request = GenerationRequest(
+            **content_media(),
             request_id=CONTRACT_REQUEST_ID,
             job_type=CONTRACT_MODEL,
             prompt="this is not the real master prompt",
@@ -309,11 +315,14 @@ class TestF_TamperedPromptViolatesContract(unittest.TestCase):
             resolution=CONTRACT_RESOLUTION,
             aspect_ratio=CONTRACT_ASPECT_RATIO,
             approved=True,
-            real_generation_authorization=_valid_auth(),
+            real_generation_authorization=video_005_authorization(),
         )
         result = gate.evaluate(tampered_request)
 
-        self.assertEqual(result.decision, GenerationApprovalDecision.APPROVED)
+        self.assertEqual(result.decision, GenerationApprovalDecision.NEEDS_APPROVAL)
+        self.assertTrue(
+            any("prompt_sha256" in reason for reason in result.reasons), result.reasons
+        )
 
 
 class TestG_TamperedAssetHashViolatesContract(unittest.TestCase):

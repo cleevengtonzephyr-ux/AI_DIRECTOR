@@ -46,6 +46,7 @@ from agents.controlled_real_provider_activation import (
     ControlledRealProviderActivationService,
 )
 from agents.generation_approval_gate import GenerationApprovalGate, GenerationRequest, RealGenerationAuthorization
+from tests.authorization_content_helpers import bind_request
 from agents.release_candidate_identity_lock import ReleaseCandidateIdentityLock, VIDEO_005_RELEASE_CANDIDATE
 from agents.production_activation_handoff import ProductionActivationHandoff
 from agents.controlled_activation_composition import verify_handoff_ready, verify_authorization_binding
@@ -74,7 +75,7 @@ def _conforming_request(**overrides) -> GenerationRequest:
         real_generation_authorization=RealGenerationAuthorization(request_id=C.request_id, authorized_by_human=True),
     )
     defaults.update(overrides)
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 def _new_p2_21_service(clock):

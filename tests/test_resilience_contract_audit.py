@@ -58,6 +58,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.authorization_content_helpers import bind_request, video_005_authorization
 from agents.generation_job_service import GenerationJobService
 from agents.human_authorization_handoff import (
     HumanAuthorizationHandoffBuilder,
@@ -106,7 +107,7 @@ def _conforming_request(**overrides) -> GenerationRequest:
         real_generation_authorization=RealGenerationAuthorization(request_id=C.request_id, authorized_by_human=True),
     )
     defaults.update(overrides)
-    return GenerationRequest(**defaults)
+    return bind_request(GenerationRequest(**defaults))
 
 
 # ------------------------------------------------------------------
@@ -205,7 +206,7 @@ class CombinedDimensionScenarioTests(unittest.TestCase):
         review = PreProductionReviewer().review(PreProductionReviewInput(preparation_result=prep_result))
         readiness = ProductionReadinessHandoffBuilder().build(ProductionReadinessHandoffInput(review=review))
         intake = ProductionAuthorityIntake().intake(ProductionAuthorityIntakeInput(handoff=readiness))
-        auth = RealGenerationAuthorization(request_id="005", authorized_by_human=True)
+        auth = video_005_authorization()
         auth_handoff = HumanAuthorizationHandoffBuilder().build(
             HumanAuthorizationHandoffInput(intake=intake, real_generation_authorization=auth)
         )
