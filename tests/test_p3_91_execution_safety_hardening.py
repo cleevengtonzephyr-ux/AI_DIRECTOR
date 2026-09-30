@@ -50,6 +50,12 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import (
+    FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+    fixture_identity_lock_for,
+    install_create_job_probe,
+)
+from tests.real_provider_path_fixtures import fixture_real_path_gate_kwargs
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
@@ -78,7 +84,7 @@ def _paths(sandbox: Path):
     return sandbox / "state" / "executed_requests.json", sandbox / "state" / "locks"
 
 
-def _chain(sandbox: Path, scenario: str = "none", lock_timeout: float = 10.0):
+def _chain(sandbox: Path, scenario: str = "none", lock_timeout: float = 10.0, request_ids=(RID,)):
     """Chaîne réelle Gate + Service + FileCriticalSectionLock +
     FileExecutedRequestStore, sur un store temporaire, avec un Provider
     mock dont chaque job accepté est consigné dans un ledger factice."""
@@ -87,26 +93,45 @@ def _chain(sandbox: Path, scenario: str = "none", lock_timeout: float = 10.0):
     ledger = sandbox / "ledger"
     ledger.mkdir(parents=True, exist_ok=True)
 
-    class _LedgerProvider(MockHiggsfieldProvider):
-        def create_job(self, job_type, prompt, **params):
-            if scenario == "C1_hard":
-                os._exit(91)  # avant tout effet côté backend
-            job = super().create_job(job_type, prompt, **params)
-            (ledger / f"{params['request_id']}-{os.getpid()}-{time.perf_counter_ns()}").write_text(job.job_id)
-            if scenario == "C2_hard":
-                os._exit(92)  # backend a accepté, réponse perdue
-            if scenario == "C2_soft":
-                raise TimeoutError("[p3.91] response lost after the backend accepted the job")
-            return job
+    # Phase D : Mock RECONNU (un Provider qui redéfinit create_job()
+    # n'atteint plus la frontière). Les crochets de crash sont portés par
+    # `install_create_job_probe()` sur `gate.in_flight()` -- à l'instant de
+    # l'appel (C1), puis juste après le retour de create_job(), avant
+    # `mark_executed()` (ledger, C2) -- et par `wait_for_job` remplacé sur
+    # l'instance, hors frontière `create_job` (C5).
+    provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=1000.0)
 
-        def wait_for_job(self, job_id, **kwargs):
-            if scenario == "C5_hard":
-                os._exit(95)
-            return super().wait_for_job(job_id, **kwargs)
+    def _at_create_job(params):
+        if scenario == "C1_hard":
+            os._exit(91)  # avant tout effet côté backend
 
-    provider = _LedgerProvider(cost_per_job=10.0, available_credits=1000.0)
+    def _after_create_job():
+        job_id, job = list(provider._jobs.items())[-1]
+        (ledger / f"{job['request_id']}-{os.getpid()}-{time.perf_counter_ns()}").write_text(job_id)
+        if scenario == "C2_hard":
+            os._exit(92)  # backend a accepté, réponse perdue
+        if scenario == "C2_soft":
+            raise TimeoutError("[p3.91] response lost after the backend accepted the job")
+
+    def _wait_for_job(job_id, **kwargs):
+        if scenario == "C5_hard":
+            os._exit(95)
+        return MockHiggsfieldProvider.wait_for_job(provider, job_id, **kwargs)
+
+    provider.on_create = _at_create_job
+    provider.after_create_job = _after_create_job
+    provider.wait_for_job = _wait_for_job
     store = FileExecutedRequestStore(state_path, lock_timeout_seconds=lock_timeout)
-    gate = GenerationApprovalGate(provider, executed_request_store=store)
+    # Phase D : fixtures EXPLICITES conservées (sans effet sur le Mock
+    # reconnu) : plafond + Identity Lock lié aux `request_ids` évalués.
+    gate = install_create_job_probe(
+        GenerationApprovalGate(
+            provider,
+            executed_request_store=store,
+            **fixture_real_path_gate_kwargs(*(_request(request_id) for request_id in request_ids)),
+        ),
+        provider,
+    )
 
     if scenario == "pre_write_ahead_hard":
         original_begin = store._begin_in_flight
@@ -157,7 +182,7 @@ def _worker(mode, sandbox, *args):
     sandbox = Path(sandbox)
     if mode == "execute":
         scenario, request_id, wid = args
-        _, _, service = _chain(sandbox, scenario)
+        _, _, service = _chain(sandbox, scenario, request_ids=(request_id,))
         if wid != "-":
             _wait_for_go(sandbox, wid)
         try:
@@ -251,8 +276,8 @@ class _SandboxCase(unittest.TestCase):
     def _state(self):
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
-    def _restart(self, lock_timeout=10.0):
-        store, gate, service = _chain(self.sandbox, lock_timeout=lock_timeout)
+    def _restart(self, lock_timeout=10.0, request_ids=(RID,)):
+        store, gate, service = _chain(self.sandbox, lock_timeout=lock_timeout, request_ids=request_ids)
         return store, gate, service
 
     def _operator_removes_orphan_locks(self):
@@ -486,7 +511,7 @@ class TestRisk2StoreConcurrency(_SandboxCase):
         for proc in procs:
             out, err = proc.communicate(timeout=240)
             self.assertIn('"EXECUTED"', out, err[-500:])
-        store, gate, service = self._restart()
+        store, gate, service = self._restart(request_ids=request_ids)
         for rid in request_ids:
             self.assertEqual(gate.evaluate(_request(rid)).decision, D.ALREADY_EXECUTED)
             self.assertFalse(store.is_unknown(rid))
@@ -541,10 +566,10 @@ class TestLockHolderCrash(_SandboxCase):
 
 class TestPersistenceAndRestart(_SandboxCase):
     def test_valid_store_survives_restart_with_history(self):
-        _, _, service = self._restart()
+        _, _, service = self._restart(request_ids=("h1", "h2"))
         first = service.execute(_request("h1"), interval_seconds=0)
         second = service.execute(_request("h2"), interval_seconds=0)
-        store, gate, _ = self._restart()
+        store, gate, _ = self._restart(request_ids=("h1", "h2"))
         self.assertEqual(store.recorded_job_id("h1"), first.job.job_id)
         self.assertEqual(store.recorded_job_id("h2"), second.job.job_id)
         self.assertEqual(self._state()["unknown_requests"], {})
@@ -571,7 +596,7 @@ class TestPersistenceAndRestart(_SandboxCase):
     def test_legacy_file_without_unknown_registry_still_works(self):
         self.state_path.parent.mkdir(parents=True)
         self.state_path.write_text(json.dumps({"executed_requests": {"old": {"executed_at": "x"}}}))
-        _, gate, service = self._restart()
+        _, gate, service = self._restart(request_ids=("old", "new"))
         self.assertEqual(gate.evaluate(_request("old")).decision, D.ALREADY_EXECUTED)
         service.execute(_request("new"), interval_seconds=0)
         self.assertEqual(set(self._state()["executed_requests"]), {"old", "new"})
@@ -672,7 +697,14 @@ class TestInFlightBoundary(_SandboxCase):
         }
         provider = HiggsfieldProvider(client=client)
         store = FileExecutedRequestStore(self.state_path)
-        gate = GenerationApprovalGate(provider, executed_request_store=store)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            provider,
+            executed_request_store=store,
+            identity_lock=fixture_identity_lock_for(_request()),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         service = GenerationJobService(provider, gate, lock=FileCriticalSectionLock(self.lock_dir))
         self.assertEqual(gate.evaluate(_request()).decision, D.APPROVED)
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
@@ -686,7 +718,7 @@ class TestInFlightBoundary(_SandboxCase):
         self.assertEqual(gate.evaluate(_request()).decision, D.APPROVED)
 
     def test_unknown_or_in_flight_of_one_request_never_blocks_another(self):
-        _, gate, service = self._restart()
+        _, gate, service = self._restart(request_ids=("a", "b", "c"))
         store = gate.executed_request_store
         with store.in_flight("a"):
             pass
@@ -699,7 +731,7 @@ class TestInFlightBoundary(_SandboxCase):
         self.assertEqual(gate.evaluate(_request("c")).decision, D.ALREADY_EXECUTED)
 
     def test_execution_identity_is_never_transferred_across_requests(self):
-        _, gate, service = self._restart()
+        _, gate, service = self._restart(request_ids=("a", "b"))
         a = service.execute(_request("a"), interval_seconds=0)
         b = service.execute(_request("b"), interval_seconds=0)
         store = gate.executed_request_store

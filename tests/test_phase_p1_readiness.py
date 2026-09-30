@@ -15,6 +15,7 @@ Deux variantes du scénario Zephyr AI sont utilisées :
   budget/approbation de la question de la durée.
 """
 
+import dataclasses
 import sys
 import unittest
 from pathlib import Path
@@ -37,6 +38,13 @@ from agents.task_manager import TaskManager
 from agents.video_agent import VideoAgent
 from director import AIDirector
 from integrations.higgsfield.provider import HiggsfieldProvider
+from tests.authorization_content_helpers import content_media
+from tests.real_provider_path_fixtures import (
+    FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+    fixture_real_path_gate_kwargs,
+    fixture_identity_lock_for,
+    fixture_video_005_identity_lock,
+)
 
 # Schéma factice reproduisant le VRAI seedance_2_0 (Phase P1.1,
 # `model get seedance_2_0` réel) : duration confirmée = 5 uniquement,
@@ -249,11 +257,18 @@ class TestPhaseP1CostCalculatedBeforeGeneration(unittest.TestCase):
 
     def test_cost_is_estimated_when_request_is_valid(self):
         _, request = _build_p1_request_confirmed()
+        request = dataclasses.replace(request, **content_media())
 
         provider, fake_client = _fake_provider(
             REAL_SEEDANCE_SCHEMA, cost=22.5, balance=1000.0
         )
-        gate = GenerationApprovalGate(provider)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
 
         result = gate.evaluate(request)
 
@@ -293,8 +308,15 @@ class TestPhaseP1NeverReachesCreateJobWithRealBalance(unittest.TestCase):
 
     def test_scenario_is_blocked_on_real_observed_balance(self):
         _, request = _build_p1_request_confirmed()
-
-        report = self.report_service.generate(request)
+        request = dataclasses.replace(request, **content_media())
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            self.provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
+        report = FinalReportService(self.provider, gate).generate(request)
 
         self.assertEqual(report.status, FinalReportStatus.NOT_EXECUTED)
         self.assertEqual(report.approval_decision, GenerationApprovalDecision.BLOCKED)
@@ -305,9 +327,15 @@ class TestPhaseP1NeverReachesCreateJobWithRealBalance(unittest.TestCase):
         _, request = _build_p1_request_confirmed()
         approved_request = type(request)(**{**request.__dict__, "approved": True})
 
-        report = self.report_service.generate(approved_request)
+        approved_request = dataclasses.replace(approved_request, **content_media())
+        # Phase D : Provider non reconnu comme mock -> fixtures EXPLICITES
+        # (plafond + Identity Lock) pour que la Gate refuse pour la raison
+        # testée, et non faute de configuration du chemin réel.
+        gate = GenerationApprovalGate(self.provider, **fixture_real_path_gate_kwargs(approved_request))
+        report = FinalReportService(self.provider, gate).generate(approved_request)
 
         self.assertEqual(report.approval_decision, GenerationApprovalDecision.BLOCKED)
+        self.assertIn("Insufficient credits", report.approval_reasons[0])
         self.fake_client.create_job.assert_not_called()
 
     def test_task_manager_path_also_never_calls_create_job(self):
@@ -319,14 +347,24 @@ class TestPhaseP1NeverReachesCreateJobWithRealBalance(unittest.TestCase):
             duration=5,
         )
 
+        # Phase D : Provider non reconnu comme mock -> fixtures EXPLICITES
+        # (plafond + Identity Lock) pour que la Gate refuse pour la raison
+        # testée, et non faute de configuration du chemin réel.
+        gate = GenerationApprovalGate(
+            self.provider,
+            identity_lock=fixture_video_005_identity_lock(duration=5),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         report = self.task_manager.process(
             task.task_id,
             self.director,
             approved=False,
-            report_service=self.report_service,
+            report_service=FinalReportService(self.provider, gate),
         )
 
         self.assertEqual(report.status, FinalReportStatus.NOT_EXECUTED)
+        self.assertEqual(report.approval_decision, GenerationApprovalDecision.BLOCKED)
+        self.assertIn("Insufficient credits", report.approval_reasons[0])
         self.fake_client.create_job.assert_not_called()
 
 
@@ -346,8 +384,15 @@ class TestPhaseP1RequiresExplicitApprovalEvenWithSufficientBudget(unittest.TestC
 
     def test_needs_approval_without_explicit_approval(self):
         _, request = _build_p1_request_confirmed()
-
-        report = self.report_service.generate(request)
+        request = dataclasses.replace(request, **content_media())
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            self.provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
+        report = FinalReportService(self.provider, gate).generate(request)
 
         self.assertEqual(report.status, FinalReportStatus.NOT_EXECUTED)
         self.assertEqual(

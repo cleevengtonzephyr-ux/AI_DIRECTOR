@@ -15,22 +15,26 @@ intégral) et que :
 - dans les deux cas, AUCUN job n'est créé, AUCUNE génération réelle
   n'a lieu.
 
-Un faux Provider (implémentant BaseHiggsfieldProvider, jamais le
-HiggsfieldProvider réel ni MockHiggsfieldProvider) capture chaque appel
-pour permettre des assertions fines sur les paramètres reçus par
-chaque couche. Aucun CLI réel, aucun réseau, aucun crédit consommé.
+Un MockHiggsfieldProvider reconnu (jamais le HiggsfieldProvider réel)
+capture chaque appel à `estimate_cost` pour permettre des assertions
+fines sur les paramètres reçus par chaque couche ; chaque `create_job()`
+y serait enregistré dans `_jobs`. Phase D : un faux Provider qui
+redéfinit `create_job()` n'atteindrait plus la frontière d'exécution.
+Aucun CLI réel, aucun réseau, aucun crédit consommé.
 """
 
+import dataclasses
 import sys
 import unittest
 from pathlib import Path
-from typing import Any, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.authorization_content_helpers import content_media
+from tests.real_provider_path_fixtures import fixture_real_path_gate_kwargs
 from agents.generation_approval_gate import (
     GenerationApprovalDecision,
     GenerationApprovalGate,
@@ -43,39 +47,20 @@ from agents.planner import VideoPlanner
 from agents.production_model import PRODUCTION_MODEL
 from agents.prompt_assembly_system import PromptAssemblySystem
 from agents.video_agent import VideoAgent
-from integrations.higgsfield.provider import BaseHiggsfieldProvider
-from integrations.higgsfield.types import CostEstimate, Job, JobStatus, ModelParam, ModelSchema, VideoResult
+from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
 
 
-class _RecordingProvider(BaseHiggsfieldProvider):
-    """Capture chaque paramètre reçu à chaque étage, sans jamais y toucher."""
+def _recording_mock(cost: float, balance: float):
+    """Phase D : Mock RECONNU qui capture, sans y toucher, chaque appel à
+    `estimate_cost` (remplacé sur l'instance, hors frontière
+    `create_job`) ; chaque `create_job()` est enregistré dans `_jobs`.
+    Un `create_job()` redéfini n'atteindrait plus la frontière."""
 
-    def __init__(self, cost: float, balance: float):
-        self._cost = cost
-        self._balance = balance
-        self.estimate_cost_calls: List[dict] = []
-        self.create_job_calls: List[dict] = []
+    provider = MockHiggsfieldProvider(cost_per_job=cost, available_credits=balance)
+    provider.estimate_cost_calls = []
 
-    def list_models(self, video: bool = True) -> List[ModelSchema]:
-        return [self._schema()]
-
-    def _schema(self) -> ModelSchema:
-        return ModelSchema(
-            job_type=PRODUCTION_MODEL,
-            display_name="Seedance 2.0",
-            params=(
-                ModelParam(name="prompt", type="string", required=True),
-                ModelParam(name="duration", type="integer", required=False, default=5),
-                ModelParam(name="resolution", type="string", required=False, default="720p"),
-                ModelParam(name="aspect_ratio", type="string", required=False, default="16:9"),
-            ),
-        )
-
-    def get_model(self, job_type: str) -> ModelSchema:
-        return self._schema()
-
-    def estimate_cost(self, job_type, prompt, duration=None, resolution=None, aspect_ratio=None):
-        self.estimate_cost_calls.append(
+    def _recording_estimate_cost(job_type, prompt, duration=None, resolution=None, aspect_ratio=None):
+        provider.estimate_cost_calls.append(
             {
                 "job_type": job_type,
                 "prompt": prompt,
@@ -84,20 +69,12 @@ class _RecordingProvider(BaseHiggsfieldProvider):
                 "aspect_ratio": aspect_ratio,
             }
         )
-        return CostEstimate(job_type=job_type, credits=self._cost)
+        return MockHiggsfieldProvider.estimate_cost(
+            provider, job_type, prompt, duration=duration, resolution=resolution, aspect_ratio=aspect_ratio
+        )
 
-    def get_account_balance(self) -> Optional[float]:
-        return self._balance
-
-    def create_job(self, job_type: str, prompt: str, **params: Any) -> Job:
-        self.create_job_calls.append({"job_type": job_type, "prompt": prompt, **params})
-        return Job(job_id="should-not-happen", job_type=job_type, status=JobStatus.QUEUED)
-
-    def get_job(self, job_id: str) -> Job:
-        raise AssertionError("get_job ne doit jamais être appelé dans ces tests.")
-
-    def wait_for_job(self, job_id, timeout_seconds=600, interval_seconds=3) -> VideoResult:
-        raise AssertionError("wait_for_job ne doit jamais être appelé dans ces tests.")
+    provider.estimate_cost = _recording_estimate_cost
+    return provider
 
 
 def _build_real_005_request(provider_cost: float, provider_balance: float):
@@ -119,8 +96,10 @@ def _build_real_005_request(provider_cost: float, provider_balance: float):
     agent = VideoAgent(prompt_assembly=prompt_assembly)
     request = agent.build_request(plan, approved=False)
 
-    provider = _RecordingProvider(cost=provider_cost, balance=provider_balance)
-    gate = GenerationApprovalGate(provider)
+    provider = _recording_mock(cost=provider_cost, balance=provider_balance)
+    # Phase D : fixtures EXPLICITES conservées (sans effet sur le Mock reconnu).
+    request = dataclasses.replace(request, **content_media())
+    gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(request))
     job_service = GenerationJobService(provider, gate)
 
     return request, real_master_prompt, provider, gate, job_service, plan
@@ -147,7 +126,7 @@ class TestSecureEndToEndIntegrationFlow(unittest.TestCase):
             job_service.execute(request)
 
         self.assertEqual(ctx.exception.approval.decision, GenerationApprovalDecision.BLOCKED)
-        self.assertEqual(provider.create_job_calls, [])
+        self.assertEqual(provider._jobs, {})
 
         # Toutes les couches ont bien reçu les MÊMES paramètres.
         self.assertEqual(len(provider.estimate_cost_calls), 1)
@@ -167,7 +146,7 @@ class TestSecureEndToEndIntegrationFlow(unittest.TestCase):
         self.assertEqual(
             ctx.exception.approval.decision, GenerationApprovalDecision.NEEDS_APPROVAL
         )
-        self.assertEqual(provider.create_job_calls, [])
+        self.assertEqual(provider._jobs, {})
         self.assertEqual(
             provider.estimate_cost_calls[0]["prompt"], real_master_prompt
         )
@@ -180,7 +159,7 @@ class TestSecureEndToEndIntegrationFlow(unittest.TestCase):
                 )
                 with self.assertRaises(GenerationJobExecutionError):
                     job_service.execute(request)
-                self.assertEqual(provider.create_job_calls, [])
+                self.assertEqual(provider._jobs, {})
 
 
 if __name__ == "__main__":

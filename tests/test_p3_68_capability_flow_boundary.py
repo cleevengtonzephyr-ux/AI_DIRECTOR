@@ -57,6 +57,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from agents.activation_contract import RequestScopedActivationService
 from agents.activation_readiness import ActivationReadinessEvaluator
 from agents.canonical_architecture_contract import CERTIFICATE_SUBSYSTEM_FILES
@@ -96,7 +97,10 @@ OPERATIONAL_METHODS = {
     GenerationJobService: ("execute",),
     GenerationApprovalGate: ("mark_executed", "mark_unknown"),
     RequestScopedActivationService: ("prepare_activation", "validate_activation"),
-    MockHiggsfieldProvider: ("create_job", "get_job", "wait_for_job"),
+    # Phase D : `create_job` n'est plus espionné sur l'instance (le Mock ne
+    # serait plus reconnu et `execute()` refuserait AVANT la Gate) ; tout
+    # appel de `create_job()` reste observé via le registre `_jobs` du Mock.
+    MockHiggsfieldProvider: ("get_job", "wait_for_job"),
 }
 DATA_LEAVES = (str, int, float, bool, type(None), enum.Enum)
 
@@ -146,7 +150,10 @@ class _World(unittest.TestCase):
         self.calls = []
         self.provider = self._spy(MockHiggsfieldProvider(cost_per_job=67.5, available_credits=1000.0))
         lock = ReleaseCandidateIdentityLock(C)
-        self.gate = self._spy(GenerationApprovalGate(self.provider, identity_lock=lock))
+        # Phase D : plafond de FIXTURE explicite (sans effet sur le Mock reconnu).
+        self.gate = self._spy(
+            GenerationApprovalGate(self.provider, identity_lock=lock, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST)
+        )
         self.activation = self._spy(RequestScopedActivationService(self.gate, lock))
         self.job_service = self._spy(
             GenerationJobService(self.provider, self.gate, activation_service=self.activation)
@@ -181,11 +188,15 @@ class _World(unittest.TestCase):
     def _unauthorized_execute_attempt(self):
         try:
             self.job_service.execute(self._request(real_generation_authorization=None))
-        except GenerationJobExecutionError:
-            self.calls.append("blocked")
+        except GenerationJobExecutionError as refusal:
+            # Refus de la Gate (autorisation absente), jamais celui de la
+            # frontière d'exécution (Phase D) : sinon, pas de "blocked".
+            if refusal.approval is not None:
+                self.calls.append("blocked")
 
     def assert_nothing_operational_ran(self):
         self.assertNotIn("MockHiggsfieldProvider.create_job", self.calls)
+        self.assertEqual(self.provider._jobs, {})  # Phase D : aucun create_job(), direct ou non
         self.assertFalse(self.gate.executed_request_store.is_executed(C.request_id))
         self.assertFalse(self.gate.executed_request_store.is_unknown(C.request_id))
 

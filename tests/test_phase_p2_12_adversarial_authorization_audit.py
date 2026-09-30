@@ -29,6 +29,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import fixture_real_path_gate_kwargs
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.executed_request_store import InMemoryExecutedRequestStore
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
@@ -318,6 +319,10 @@ class TestJ_NoCacheOfAnyPriorDecision(unittest.TestCase):
         # Phase B : `_clock` est une fonction d'horloge sans état,
         # relue à chaque évaluation pour l'expiration de
         # `authorized_at` -- jamais une valeur mise en cache.
+        #
+        # Phase D : `max_cost_credits_per_request` est un plafond fixé
+        # par l'appelant à la construction (défaut `None`), jamais un
+        # coût ou un solde mis en cache par le Gate.
         provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=100.0)
         gate = GenerationApprovalGate(provider)
 
@@ -326,8 +331,12 @@ class TestJ_NoCacheOfAnyPriorDecision(unittest.TestCase):
         attribute_names = set(vars(gate).keys())
         self.assertEqual(
             attribute_names,
-            {"provider", "cost_service", "executed_request_store", "identity_lock", "_clock"},
+            {
+                "provider", "cost_service", "executed_request_store", "identity_lock", "_clock",
+                "max_cost_credits_per_request",
+            },
         )
+        self.assertIsNone(gate.max_cost_credits_per_request)
         self.assertTrue(callable(gate._clock))
 
         store = gate.executed_request_store
@@ -339,8 +348,10 @@ class TestJ_NoCacheOfAnyPriorDecision(unittest.TestCase):
 
     def test_evaluate_called_twice_recomputes_cost_and_balance_each_time(self):
         provider = MagicMock(wraps=MockHiggsfieldProvider(cost_per_job=10.0, available_credits=100.0))
-        gate = GenerationApprovalGate(provider)
         auth = _valid_auth()
+        # Phase D : un wrapper MagicMock n'est pas un mock reconnu -> fixtures
+        # EXPLICITES : plafond + Identity Lock lié au contenu exact.
+        gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(_request(real_generation_authorization=auth)))
 
         gate.evaluate(_request(real_generation_authorization=auth))
         gate.evaluate(_request(real_generation_authorization=auth))

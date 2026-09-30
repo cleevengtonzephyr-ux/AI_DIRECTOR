@@ -53,6 +53,11 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import (
+    counting_mock_provider,
+    fixture_real_path_gate_kwargs,
+    install_create_job_probe,
+)
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import (
     CriticalStateUnknownAndUnrecordedError,
@@ -78,17 +83,14 @@ def _request(request_id=RID) -> GenerationRequest:
     ))
 
 
-class _HookedProvider(MockHiggsfieldProvider):
-    """Mock dont `create_job()` peut exécuter un crochet de test juste
-    après la création du job (simule un événement disque concurrent)."""
+def _HookedProvider(**kwargs):
+    """Mock RECONNU dont un crochet de test s'exécute juste après la
+    création du job (simule un événement disque concurrent). Phase D : le
+    crochet `after_create_job` est exécuté par `install_create_job_probe()`
+    au retour de `create_job()`, avant `mark_executed()` -- jamais par un
+    `create_job()` redéfini."""
 
-    after_create_job = None
-
-    def create_job(self, job_type, prompt, **params):
-        job = super().create_job(job_type, prompt, **params)
-        if self.after_create_job is not None:
-            self.after_create_job()
-        return job
+    return counting_mock_provider(**kwargs)
 
 
 def _worker_store_contend(state_path_str, iterations, result_queue):
@@ -140,7 +142,12 @@ class _SandboxCase(unittest.TestCase):
     def _chain(self, lock_timeout=10.0):
         provider = _HookedProvider(cost_per_job=10.0, available_credits=1000.0)
         store = FileExecutedRequestStore(self.state_path, lock_timeout_seconds=lock_timeout)
-        gate = GenerationApprovalGate(provider, executed_request_store=store)
+        # Phase D : _HookedProvider (non reconnu comme mock) -> fixtures
+        # EXPLICITES : plafond + Identity Lock lié au contenu exact.
+        gate = install_create_job_probe(
+            GenerationApprovalGate(provider, executed_request_store=store, **fixture_real_path_gate_kwargs(_request())),
+            provider,
+        )
         service = GenerationJobService(provider, gate, lock=FileCriticalSectionLock(self.lock_dir))
         return provider, store, gate, service
 

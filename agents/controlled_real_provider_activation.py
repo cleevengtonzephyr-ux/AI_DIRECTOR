@@ -108,7 +108,10 @@ from agents.generation_approval_gate import (
     GenerationApprovalGate,
     GenerationRequest,
     RealGenerationAuthorization,
+    is_exact_disabled_real_provider,
+    is_recognized_test_mock_provider,
 )
+from agents.generation_cost_service import CostEstimationStatus, is_usable_credit_amount
 from agents.release_candidate_identity_lock import ReleaseCandidateIdentityLock
 from integrations.higgsfield.provider import HiggsfieldProvider
 
@@ -260,6 +263,19 @@ class ControlledRealProviderActivationService:
             if cost_result.estimate is not None
             else None
         )
+
+        cost_reasons = self._expected_cost_violations(expected_cost)
+        if cost_result.status != CostEstimationStatus.KNOWN:
+            cost_reasons.append(
+                f"Cost estimate status is {cost_result.status.value}, not "
+                f"known -- a contract is never prepared for an unknown cost."
+            )
+        if cost_reasons:
+            raise ControlledRealProviderActivationRejectedError(
+                f"Cannot prepare contract for request "
+                f"'{request.request_id}': expected cost is not authorized.",
+                cost_reasons,
+            )
 
         avatar_sha256 = _sha256_of_file_or_none(
             request.start_image.source if request.start_image else None
@@ -509,6 +525,71 @@ class ControlledRealProviderActivationService:
 
         reasons.extend(self._fresh_violations(request, request_scoped_contract))
 
+        # Phase D : `expected_cost_credits` n'est plus seulement observé.
+        # Il doit rester sous le plafond configuré ET correspondre au coût
+        # que la Gate évalue à cet instant -- sinon le coût a changé
+        # depuis `prepare()` et le contrat ne couvre plus ce qui serait
+        # exécuté.
+        reasons.extend(self._expected_cost_violations(provider_contract.expected_cost_credits))
+        fresh_cost = self.gate.cost_service.estimate(
+            job_type=request.job_type,
+            prompt=request.prompt,
+            duration=request.duration,
+            resolution=request.resolution,
+            aspect_ratio=request.aspect_ratio,
+        )
+        fresh_credits = fresh_cost.estimate.credits if fresh_cost.estimate is not None else None
+        if (
+            fresh_cost.status != CostEstimationStatus.KNOWN
+            or not is_usable_credit_amount(fresh_credits)
+            or fresh_credits != provider_contract.expected_cost_credits
+        ):
+            reasons.append(
+                f"Contract expected_cost_credits "
+                f"{provider_contract.expected_cost_credits!r} does not match "
+                f"the cost currently authorized by the Gate "
+                f"({fresh_cost.status.value}, {fresh_credits!r})."
+            )
+
+        return reasons
+
+    def _expected_cost_violations(self, expected_cost: Optional[float]) -> List[str]:
+        """Phase D — le coût attendu doit être un montant exploitable et ne
+        jamais dépasser le plafond par requête configuré sur la Gate.
+        Pour tout Provider autre qu'un mock de test reconnu
+        (`GenerationApprovalGate.requires_real_path_protections()`), un
+        plafond absent ou inexploitable est lui-même un refus (jamais
+        « sans limite ») ; pour un mock reconnu sans plafond, aucune
+        limite n'est appliquée ici. Le Provider réel reste de toute façon refusé par
+        l'identité de méthode de `_fresh_violations()` et par son
+        `raise` inconditionnel."""
+
+        reasons: List[str] = []
+        ceiling = self.gate.max_cost_credits_per_request
+
+        if ceiling is not None and not is_usable_credit_amount(ceiling):
+            reasons.append(
+                f"Configured per-request ceiling {ceiling!r} is not a "
+                f"finite, non-negative number of credits."
+            )
+        elif ceiling is None and self.gate.requires_real_path_protections():
+            reasons.append(
+                "Real or unrecognized provider path: no explicitly configured "
+                "per-request credit ceiling; expected cost cannot be "
+                "authorized."
+            )
+
+        if not is_usable_credit_amount(expected_cost):
+            reasons.append(
+                f"Expected cost {expected_cost!r} is not a finite, "
+                f"non-negative number of credits."
+            )
+        elif is_usable_credit_amount(ceiling) and expected_cost > ceiling:
+            reasons.append(
+                f"Expected cost {expected_cost} exceeds the configured "
+                f"per-request ceiling of {ceiling} credits."
+            )
+
         return reasons
 
     # ------------------------------------------------------------------
@@ -547,7 +628,22 @@ class ControlledRealProviderActivationService:
         # booléen global : identité de méthode contre le VRAI Provider
         # désactivé, jamais déterminé en l'appelant.
         provider = self.gate.provider
-        if type(provider).create_job is HiggsfieldProvider.create_job:
+        if not (
+            is_recognized_test_mock_provider(provider)
+            or is_exact_disabled_real_provider(provider)
+        ):
+            # Phase D : une sous-classe du vrai Provider (create_job
+            # redéfini), un wrapper ou un Provider inconnu échapperait à
+            # l'identité de méthode ci-dessous -- il ne peut pas pour
+            # autant remplacer ce verrou. Vérifié EN PREMIER : ce test ne
+            # lève jamais, même pour un objet sans `create_job` de classe.
+            reasons.append(
+                f"provider {type(provider).__name__} is neither the real "
+                f"HiggsfieldProvider nor a recognized test mock -- a "
+                f"subclass, wrapper or unknown provider can never "
+                f"validate the provider activation boundary."
+            )
+        elif type(provider).create_job is HiggsfieldProvider.create_job:
             reasons.append(
                 "provider is the real HiggsfieldProvider, whose "
                 "create_job() unconditionally raises "

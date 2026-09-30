@@ -48,6 +48,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST, fixture_identity_lock_for
 from tests.authorization_content_helpers import (
     bind_request,
     content_media,
@@ -405,13 +406,18 @@ class TestJ_RealProviderCreateJobAlwaysDisabled(unittest.TestCase):
         }
 
         real_provider = HiggsfieldProvider(client=fake_client)
-        gate = GenerationApprovalGate(real_provider)
-        service = GenerationJobService(real_provider, gate)
-
         request = _build_real_video_005_request(
             duration=5,  # confirmé pour ce Mock (5/10/15 acceptés)
             real_generation_authorization=_valid_auth(),
         )
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
+        service = GenerationJobService(real_provider, gate)
 
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
             service.execute(request)
@@ -444,14 +450,19 @@ class TestK_NoCombinationOfConditionsPermitsRealCreateJob(unittest.TestCase):
             ],
         }
         real_provider = HiggsfieldProvider(client=fake_client)
-        gate = GenerationApprovalGate(real_provider)
-        service = GenerationJobService(real_provider, gate)
-
         request = _build_real_video_005_request(
             prompt=prompt,
             duration=5,
             real_generation_authorization=_valid_auth(),
         )
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
+        service = GenerationJobService(real_provider, gate)
 
         approval = gate.evaluate(request)
         self.assertEqual(approval.decision, GenerationApprovalDecision.APPROVED)

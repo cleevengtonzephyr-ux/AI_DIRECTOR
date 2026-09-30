@@ -54,6 +54,13 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import (
+    counting_mock_provider,
+    install_create_job_probe,
+    FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+    fixture_identity_lock_for,
+    fixture_real_path_gate_kwargs,
+)
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
@@ -113,23 +120,24 @@ def _digest(authorization_id):
     return hashlib.sha256(authorization_id.encode("utf-8")).hexdigest()
 
 
-class _CountingProvider(MockHiggsfieldProvider):
-    """Mock : compte chaque create_job(), peut refuser comme le vrai
-    Provider, ou observer l'état au moment exact de l'appel."""
+def _counting_provider(refuse=False, on_create=None, **kwargs):
+    """Mock RECONNU : compte chaque create_job(), peut refuser comme le vrai
+    Provider, ou observer l'état au moment exact de l'appel. Phase D :
+    l'instrumentation n'est plus dans `create_job()` (un Provider qui le
+    redéfinit ne l'atteint plus) mais sur `gate.in_flight()`, via
+    `install_create_job_probe()` -- même instant, même ordre."""
 
-    def __init__(self, *args, refuse=False, on_create=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.create_calls = 0
-        self.refuse = refuse
-        self.on_create = on_create
+    return counting_mock_provider(refuse=refuse, on_create=on_create, **kwargs)
 
-    def create_job(self, job_type, prompt, **params):
-        self.create_calls += 1
-        if self.on_create is not None:
-            self.on_create(params)
-        if self.refuse:
-            raise HiggsfieldRealGenerationDisabledError("mock refusal before any client call")
-        return super().create_job(job_type, prompt, **params)
+
+def _real_path_fixtures(*request_ids):
+    """Phase D : les Gates de ce fichier gardent des fixtures EXPLICITES (plafond + Identity
+    Lock), sans effet sur un mock reconnu mais requises pour tout autre Provider -> fixtures EXPLICITES : plafond + Identity Lock lié au
+    contenu exact des requêtes évaluées (`RID` par défaut)."""
+
+    return fixture_real_path_gate_kwargs(
+        *(_request(request_id=request_id) for request_id in (request_ids or (RID,)))
+    )
 
 
 def _paths(sandbox: Path):
@@ -146,10 +154,13 @@ class _Sandbox(unittest.TestCase):
     def _store(self, **kwargs):
         return FileExecutedRequestStore(self.state_path, **kwargs)
 
-    def _chain(self, cost=10.0, store=None, **provider_kwargs):
-        provider = _CountingProvider(cost_per_job=cost, available_credits=1000.0, **provider_kwargs)
+    def _chain(self, cost=10.0, store=None, request_ids=(RID,), **provider_kwargs):
+        provider = _counting_provider(cost_per_job=cost, available_credits=1000.0, **provider_kwargs)
         store = store or self._store()
-        gate = GenerationApprovalGate(provider, executed_request_store=store)
+        gate = GenerationApprovalGate(
+            provider, executed_request_store=store, **_real_path_fixtures(*request_ids)
+        )
+        install_create_job_probe(gate, provider)
         service = GenerationJobService(provider, gate, lock=FileCriticalSectionLock(self.lock_dir))
         return provider, store, gate, service
 
@@ -243,9 +254,13 @@ class TestReadsNeverConsume(_Sandbox):
             ),),
             real_generation_authorization=auth,
         ))
-        provider = _CountingProvider(cost_per_job=67.5, available_credits=100.0)
+        provider = _counting_provider(cost_per_job=67.5, available_credits=100.0)
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(provider, executed_request_store=self._store(), identity_lock=identity_lock)
+        gate = GenerationApprovalGate(
+            provider, executed_request_store=self._store(), identity_lock=identity_lock,
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,  # Phase D : plafond de FIXTURE explicite
+        )
+        install_create_job_probe(gate, provider)
         activation_service = RequestScopedActivationService(gate, identity_lock)
         readiness = ActivationReadinessEvaluator(gate, identity_lock, activation_service)
 
@@ -332,8 +347,9 @@ class TestRefusalBeforeConsumptionPoint(_Sandbox):
 
     def test_budget_refusal_does_not_consume(self):
         auth = _auth()
-        provider = _CountingProvider(cost_per_job=10.0, available_credits=1.0)
-        gate = GenerationApprovalGate(provider, executed_request_store=self._store())
+        provider = _counting_provider(cost_per_job=10.0, available_credits=1.0)
+        gate = GenerationApprovalGate(provider, executed_request_store=self._store(), **_real_path_fixtures())
+        install_create_job_probe(gate, provider)
         with self.assertRaises(GenerationJobExecutionError):
             GenerationJobService(provider, gate).execute(_request(auth), interval_seconds=0)
         self._assert_untouched(provider, gate, auth)
@@ -358,8 +374,9 @@ class TestRefusalBeforeConsumptionPoint(_Sandbox):
         from agents.activation_contract import RequestScopedActivationContract
 
         auth = _auth()
-        provider = _CountingProvider(cost_per_job=10.0, available_credits=1000.0)
-        gate = GenerationApprovalGate(provider, executed_request_store=self._store())
+        provider = _counting_provider(cost_per_job=10.0, available_credits=1000.0)
+        gate = GenerationApprovalGate(provider, executed_request_store=self._store(), **_real_path_fixtures())
+        install_create_job_probe(gate, provider)
         activation_service = MagicMock()
         activation_service.inspect_activation.return_value = ["forged contract"]
         service = GenerationJobService(provider, gate, activation_service=activation_service)
@@ -413,9 +430,16 @@ class TestConsumptionIsNeverUndone(_Sandbox):
             ],
         }
         provider = HiggsfieldProvider(client=client)
-        gate = GenerationApprovalGate(provider, executed_request_store=self._store())
-        service = GenerationJobService(provider, gate, lock=FileCriticalSectionLock(self.lock_dir))
         auth = _auth()
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            provider,
+            executed_request_store=self._store(),
+            identity_lock=fixture_identity_lock_for(_request(auth)),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
+        service = GenerationJobService(provider, gate, lock=FileCriticalSectionLock(self.lock_dir))
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
             service.execute(_request(auth), interval_seconds=0)
         client.create_job.assert_not_called()
@@ -448,8 +472,9 @@ class TestConsumptionIsNeverUndone(_Sandbox):
 
     def test_in_memory_consumption_is_never_undone_by_rollback(self):
         store = InMemoryExecutedRequestStore()
-        provider = _CountingProvider(cost_per_job=10.0, available_credits=1000.0, refuse=True)
-        gate = GenerationApprovalGate(provider, executed_request_store=store)
+        provider = _counting_provider(cost_per_job=10.0, available_credits=1000.0, refuse=True)
+        gate = GenerationApprovalGate(provider, executed_request_store=store, **_real_path_fixtures())
+        install_create_job_probe(gate, provider)
         auth = _auth()
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
             GenerationJobService(provider, gate).execute(_request(auth), interval_seconds=0)
@@ -538,11 +563,12 @@ class TestThreadConcurrency(_Sandbox):
     def test_execute_threads_with_noop_lock_create_at_most_one_job(self):
         for store in (self._store(), InMemoryExecutedRequestStore()):
             with self.subTest(store=type(store).__name__):
-                provider = _CountingProvider(
+                provider = _counting_provider(
                     cost_per_job=10.0, available_credits=1000.0,
                     on_create=lambda params: time.sleep(0.05),
                 )
-                gate = GenerationApprovalGate(provider, executed_request_store=store)
+                gate = GenerationApprovalGate(provider, executed_request_store=store, **_real_path_fixtures())
+                install_create_job_probe(gate, provider)
                 service = GenerationJobService(provider, gate)  # NoOp lock
                 auth = _auth(authorization_id=f"thread-auth-{type(store).__name__}")
                 results = _race(6, lambda i: service.execute(_request(auth), interval_seconds=0))
@@ -554,8 +580,11 @@ def _worker(mode, sandbox, wid):
     sandbox = Path(sandbox)
     state_path, _, _ = _paths(sandbox)
     if mode == "burn":
-        provider = _CountingProvider(cost_per_job=10.0, available_credits=1000.0)
-        gate = GenerationApprovalGate(provider, executed_request_store=FileExecutedRequestStore(state_path))
+        provider = _counting_provider(cost_per_job=10.0, available_credits=1000.0)
+        gate = GenerationApprovalGate(
+                provider, executed_request_store=FileExecutedRequestStore(state_path), **_real_path_fixtures()
+            )
+        install_create_job_probe(gate, provider)
         gate.in_flight = lambda request_id: os._exit(97)  # arrêt dur après consommation
         GenerationJobService(provider, gate).execute(
             _request(_auth(authorization_id="burned-auth")), interval_seconds=0
@@ -568,11 +597,14 @@ def _worker(mode, sandbox, wid):
         if mode == "registry":
             FileExecutedRequestStore(state_path).authorization_registry.consume("shared-auth", f"r{wid}")
         else:
-            provider = _CountingProvider(cost_per_job=10.0, available_credits=1000.0)
+            provider = _counting_provider(cost_per_job=10.0, available_credits=1000.0)
             ledger = sandbox / "ledger"
             ledger.mkdir(exist_ok=True)
             provider.on_create = lambda params: (ledger / f"job-{wid}").write_text("1")
-            gate = GenerationApprovalGate(provider, executed_request_store=FileExecutedRequestStore(state_path))
+            gate = GenerationApprovalGate(
+                provider, executed_request_store=FileExecutedRequestStore(state_path), **_real_path_fixtures()
+            )
+            install_create_job_probe(gate, provider)
             service = GenerationJobService(provider, gate)  # NoOp lock : le registre arbitre
             service.execute(_request(_auth(authorization_id="shared-auth")), interval_seconds=0)
         print(json.dumps({"result": "OK"}))
@@ -698,8 +730,9 @@ class TestFailClosed(_Sandbox):
             def in_flight(self, request_id):
                 raise AssertionError("must never be reached")
 
-        provider = _CountingProvider(cost_per_job=10.0, available_credits=1000.0)
-        gate = GenerationApprovalGate(provider, executed_request_store=_LegacyStore())
+        provider = _counting_provider(cost_per_job=10.0, available_credits=1000.0)
+        gate = GenerationApprovalGate(provider, executed_request_store=_LegacyStore(), **_real_path_fixtures())
+        install_create_job_probe(gate, provider)
         self.assertEqual(gate.evaluate(_request()).decision, D.BLOCKED)
         with self.assertRaises(ExecutedRequestStoreCorruptedError):
             gate.consume_authorization(RID, "auth-1")
@@ -743,7 +776,7 @@ class TestLegacyFileCompatibility(_Sandbox):
                 shutil.rmtree(self.sandbox / "state", ignore_errors=True)
                 self.state_path.parent.mkdir(parents=True)
                 self.state_path.write_text(json.dumps(payload), encoding="utf-8")
-                _, _, gate, service = self._chain()
+                _, _, gate, service = self._chain(request_ids=("old", "new"))
                 self.assertEqual(gate.evaluate(_request(request_id="old")).decision, D.ALREADY_EXECUTED)
                 auth = _auth("new")
                 service.execute(_request(auth, request_id="new"), interval_seconds=0)
@@ -768,8 +801,9 @@ class TestConsumedAuthorizationNeverApproved(_Sandbox):
                     store = store_factory()
                     auth = _auth()
                     store.authorization_registry.consume(auth.authorization_id, RID)
-                    provider = _CountingProvider(cost_per_job=cost, available_credits=1000.0)
-                    gate = GenerationApprovalGate(provider, executed_request_store=store)
+                    provider = _counting_provider(cost_per_job=cost, available_credits=1000.0)
+                    gate = GenerationApprovalGate(provider, executed_request_store=store, **_real_path_fixtures())
+                    install_create_job_probe(gate, provider)
                     result = gate.evaluate(_request(auth))
                     self.assertEqual(result.decision, D.NEEDS_APPROVAL)
                     self.assertIn(
@@ -797,9 +831,13 @@ class TestReadinessSignals(_Sandbox):
             VIDEO_005_RELEASE_CANDIDATE as C,
         )
 
-        provider = _CountingProvider(cost_per_job=10.0, available_credits=1000.0)
+        provider = _counting_provider(cost_per_job=10.0, available_credits=1000.0)
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(provider, executed_request_store=store, identity_lock=identity_lock)
+        gate = GenerationApprovalGate(
+            provider, executed_request_store=store, identity_lock=identity_lock,
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,  # Phase D : plafond de FIXTURE explicite
+        )
+        install_create_job_probe(gate, provider)
         return ActivationReadinessEvaluator(gate, identity_lock, RequestScopedActivationService(gate, identity_lock))
 
     def test_non_persistent_store_is_reported(self):

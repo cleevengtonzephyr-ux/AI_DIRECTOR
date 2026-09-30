@@ -57,6 +57,13 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import (
+    FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+    counting_mock_provider,
+    fixture_identity_lock_for,
+    install_create_job_probe,
+)
+from tests.real_provider_path_fixtures import fixture_real_path_gate_kwargs
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import (
     CriticalStateUnknownAndUnrecordedError,
@@ -120,13 +127,17 @@ class _RaisingMarkExecutedGate(GenerationApprovalGate):
         super().mark_unknown(request_id, reason=reason, job_id=job_id)
 
 
-class _CreateJobFailsProvider(MockHiggsfieldProvider):
+def _create_job_fails(params):
+    raise ConnectionError("[test] simulated create_job() network failure")
+
+
+def _CreateJobFailsProvider(**kwargs):
     """Double de test : `create_job()` échoue systématiquement (ex.
     coupure réseau/CLI AVANT toute création réelle) -- aucun job n'a
-    jamais existé, donc rien à marquer."""
+    jamais existé, donc rien à marquer. Phase D : Mock RECONNU ; l'échec
+    est levé à l'instant de l'appel par `install_create_job_probe()`."""
 
-    def create_job(self, job_type: str, prompt: str, **params):
-        raise ConnectionError("[test] simulated create_job() network failure")
+    return counting_mock_provider(on_create=_create_job_fails, **kwargs)
 
 
 class TestA_DefaultBehaviorUnchanged(unittest.TestCase):
@@ -389,7 +400,10 @@ class TestI_CreateJobFailureLeavesNoMarking(unittest.TestCase):
     def test_create_job_failure_propagates_and_marks_nothing(self):
         provider = _CreateJobFailsProvider(cost_per_job=10.0, available_credits=100.0)
         store = InMemoryExecutedRequestStore()
-        gate = GenerationApprovalGate(provider, executed_request_store=store)
+        # Phase D : Provider instrumenté (non reconnu comme mock) -> fixtures
+        # EXPLICITES : plafond + Identity Lock lié au contenu exact.
+        gate = GenerationApprovalGate(provider, executed_request_store=store, **fixture_real_path_gate_kwargs(_request()))
+        install_create_job_probe(gate, provider)
         service = GenerationJobService(provider, gate)
 
         request = _request()
@@ -405,7 +419,10 @@ class TestI_CreateJobFailureLeavesNoMarking(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
 
         provider = _CreateJobFailsProvider(cost_per_job=10.0, available_credits=100.0)
-        gate = GenerationApprovalGate(provider)
+        # Phase D : Provider instrumenté (non reconnu comme mock) -> fixtures
+        # EXPLICITES : plafond + Identity Lock lié au contenu exact.
+        gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(_request()))
+        install_create_job_probe(gate, provider)
         lock = FileCriticalSectionLock(tmp)
         service = GenerationJobService(provider, gate, lock=lock)
 
@@ -598,11 +615,16 @@ class TestM_RealProviderStaysDisabledWithLock(unittest.TestCase):
         }
 
         real_provider = HiggsfieldProvider(client=fake_client)
-        gate = GenerationApprovalGate(real_provider)
+        request = _request(duration=5)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         lock = FileCriticalSectionLock(self._tmp)
         service = GenerationJobService(real_provider, gate, lock=lock)
-
-        request = _request(duration=5)
 
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
             service.execute(request, interval_seconds=0)

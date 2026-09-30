@@ -64,10 +64,12 @@ def _conforming_request(**overrides) -> GenerationRequest:
     return GenerationRequest(**defaults)
 
 
-def _issuer(available_credits=1000.0):
+def _issuer(available_credits=1000.0, max_cost_credits_per_request=None):
     provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=available_credits)
     identity_lock = ReleaseCandidateIdentityLock(C)
-    gate = GenerationApprovalGate(provider, identity_lock=identity_lock)
+    gate = GenerationApprovalGate(
+        provider, identity_lock=identity_lock, max_cost_credits_per_request=max_cost_credits_per_request
+    )
     activation_service = RequestScopedActivationService(gate, identity_lock)
     evaluator = ActivationReadinessEvaluator(gate, identity_lock, activation_service)
     return ProductionActivationReadinessCertificateIssuer(evaluator), gate

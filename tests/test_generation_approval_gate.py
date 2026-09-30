@@ -119,13 +119,16 @@ class TestUnknownCost(unittest.TestCase):
 
         self.assertEqual(result.decision, GenerationApprovalDecision.NEEDS_APPROVAL)
 
-    def test_unknown_cost_approved_when_explicit_approval_given(self):
+    def test_unknown_cost_blocked_even_with_explicit_approval_and_authorization(self):
+        # Phase D (condition 4) : approbation explicite + autorisation
+        # humaine liée au contenu ne rendent jamais UNKNOWN approuvable.
         provider = MockHiggsfieldProvider(cost_per_job=None)
         gate = GenerationApprovalGate(provider)
 
         result = gate.evaluate(_request(approved=True))
 
-        self.assertEqual(result.decision, GenerationApprovalDecision.APPROVED)
+        self.assertEqual(result.decision, GenerationApprovalDecision.BLOCKED)
+        self.assertTrue(any("never approvable" in r for r in result.reasons), result.reasons)
 
     def test_unknown_cost_never_auto_approves_without_explicit_flag(self):
         # Répéter plusieurs fois : jamais d'APPROVED implicite.

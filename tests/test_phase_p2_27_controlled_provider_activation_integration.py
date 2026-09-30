@@ -52,6 +52,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import (
     GenerationJobActivationRejectedError,
@@ -224,7 +225,13 @@ class TestRealProviderBlockedScenario(P2_27_TestCase):
         }
         real_provider = HiggsfieldProvider(client=fake_client)
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(real_provider, identity_lock=identity_lock)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=identity_lock,
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         rs_service = RequestScopedActivationService(gate, identity_lock)
         pa_service = ControlledRealProviderActivationService(gate, identity_lock, rs_service)
         lock = FileCriticalSectionLock(self._tmp)
@@ -705,7 +712,13 @@ class TestDoubleConsent(P2_27_TestCase):
         }
         real_provider = HiggsfieldProvider(client=fake_client)
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(real_provider, identity_lock=identity_lock)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=identity_lock,
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         rs_service = RequestScopedActivationService(gate, identity_lock)
         pa_service = ControlledRealProviderActivationService(gate, identity_lock, rs_service)
 

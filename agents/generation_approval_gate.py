@@ -45,6 +45,23 @@ IMPORTANT — séparation stricte des responsabilités :
   aussi porter les empreintes exactes du prompt, de l'avatar et de la
   référence visage réellement évalués (cf.
   `_authorization_content_reasons()`).
+- COÛT (Phase D) : seul un coût KNOWN, fini et >= 0 peut mener à
+  APPROVED ; UNKNOWN et ERROR ne l'atteignent jamais, même avec
+  `approved` et autorisation humaine (UNKNOWN : NEEDS_APPROVAL s'il
+  manque aussi une approbation, sinon BLOCKED ; ERROR : BLOCKED). Solde
+  non fini ou négatif, ou coût supérieur au
+  plafond par requête configuré (`max_cost_credits_per_request`) :
+  BLOCKED. Aucun montant de plafond n'est choisi ici.
+- CHEMIN RÉEL (Phase D) : pour tout Provider qui n'est pas un mock de
+  test reconnu -- vrai `HiggsfieldProvider`, ses sous-classes (même si
+  `create_job` est redéfini), Provider inconnu, wrapper ou `MagicMock`
+  -- l'absence de plafond par requête exploitable OU d'Identity Lock
+  donne BLOCKED, quelle que soit l'approbation, avant même
+  l'estimation du coût (`_real_provider_configuration_reasons()`).
+  Seule une instance de type EXACT `MockHiggsfieldProvider` dont
+  `create_job` reste la simulation en mémoire du Mock en est dispensée
+  (`is_recognized_test_mock()`) ; les sous-classes du Mock ne le sont
+  pas.
 - La CRÉATION RÉELLE DU JOB n'est JAMAIS effectuée ici. Ce module
   n'importe ni HiggsfieldClient, ni subprocess, et n'appelle jamais
   `create_job()`.
@@ -66,6 +83,7 @@ réelles. Une lecture d'état corrompue échoue TOUJOURS fermée
 """
 
 import hashlib
+import itertools
 import re
 import sys
 import uuid
@@ -90,6 +108,7 @@ from agents.generation_cost_service import (
     CostEstimationStatus,
     GenerationCostResult,
     GenerationCostService,
+    is_usable_credit_amount,
 )
 from agents.production_model import PRODUCTION_MODEL
 from agents.release_candidate_identity_lock import (
@@ -97,7 +116,8 @@ from agents.release_candidate_identity_lock import (
     _sha256_of_file,
 )
 from integrations.higgsfield.errors import HiggsfieldError
-from integrations.higgsfield.provider import BaseHiggsfieldProvider
+from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
+from integrations.higgsfield.provider import BaseHiggsfieldProvider, HiggsfieldProvider
 from integrations.higgsfield.types import MediaReference
 
 # Durées EMPIRIQUEMENT confirmées par lecture seule (Phase P1.2,
@@ -118,6 +138,58 @@ from integrations.higgsfield.types import MediaReference
 CONFIRMED_DURATIONS_BY_MODEL: dict = {
     PRODUCTION_MODEL: (5, 10, 15),
 }
+
+
+def is_recognized_test_mock_provider(provider) -> bool:
+    """Phase D -- vrai UNIQUEMENT si `provider` est EXACTEMENT un
+    `MockHiggsfieldProvider` (jamais une sous-classe : une sous-classe
+    peut redéfinir `create_job`, `__getattribute__` ou des descripteurs)
+    dont la création de job reste la simulation en mémoire du Mock :
+    `create_job` non remplacé sur l'instance, et état interne lu par
+    cette méthode (`_jobs`, `_job_ids`) de types exacts `dict` et
+    `itertools.count`. Le type est lu par `type()` (jamais `__class__`,
+    falsifiable). Un tel Provider ne peut créer aucun job réel ni
+    consommer de crédit. Une modification de la classe elle-même à
+    l'exécution (monkeypatch dans le processus) reste hors du modèle de
+    menace, comme pour `HiggsfieldProvider.create_job`. Ne lève jamais
+    d'exception (échec -> `False`)."""
+
+    try:
+        if type(provider) is not MockHiggsfieldProvider:
+            return False
+        instance_attributes = object.__getattribute__(provider, "__dict__")
+        return (
+            "create_job" not in instance_attributes
+            and type(instance_attributes.get("_jobs")) is dict
+            and type(instance_attributes.get("_job_ids")) is itertools.count
+        )
+    except Exception:
+        return False
+
+
+def is_exact_disabled_real_provider(provider) -> bool:
+    """Phase D -- vrai UNIQUEMENT si `provider` est EXACTEMENT le vrai
+    `HiggsfieldProvider` (jamais une sous-classe) sans `create_job`
+    remplacé sur l'instance : son `create_job()` lève alors
+    inconditionnellement `HiggsfieldRealGenerationDisabledError`. Ne lève
+    jamais d'exception (échec -> `False`)."""
+
+    try:
+        if type(provider) is not HiggsfieldProvider:
+            return False
+        return "create_job" not in object.__getattribute__(provider, "__dict__")
+    except Exception:
+        return False
+
+
+def may_reach_create_job(provider) -> bool:
+    """Phase D -- frontière d'exécution : seules deux implémentations
+    EXPLICITEMENT sûres peuvent recevoir un appel `create_job()` : le Mock
+    reconnu (simulation en mémoire) et le vrai `HiggsfieldProvider` exact
+    (refus inconditionnel). Sous-classes, wrappers, Providers inconnus et
+    objets instrumentés ne peuvent jamais remplacer ce verrou."""
+
+    return is_recognized_test_mock_provider(provider) or is_exact_disabled_real_provider(provider)
 
 
 def _utc_now() -> datetime:
@@ -322,6 +394,7 @@ class GenerationApprovalGate:
         executed_request_store=None,
         identity_lock: Optional[ReleaseCandidateIdentityLock] = None,
         clock: Optional[Callable[[], datetime]] = None,
+        max_cost_credits_per_request: Optional[float] = None,
     ):
         """
         `executed_request_store` (Phase P2.15) : persiste le replay
@@ -342,19 +415,42 @@ class GenerationApprovalGate:
         construisent `GenerationApprovalGate(provider)` sans cet
         argument. Le chemin de production réel (director.py) injecte
         explicitement un `ReleaseCandidateIdentityLock` lié à la
-        Release Candidate actuellement validée (Video 005).
+        Release Candidate actuellement validée (Video 005). Phase D :
+        pour tout Provider autre qu'un mock de test reconnu
+        (`is_recognized_test_mock()`), son absence rend toute
+        évaluation BLOCKED.
 
         `clock` (Phase B) : horloge UTC utilisée pour vérifier
         l'expiration de `RealGenerationAuthorization.authorized_at`.
         Par défaut, l'heure réelle ; injectable pour des tests
         déterministes.
+
+        `max_cost_credits_per_request` (Phase D) : plafond de crédits
+        par requête, EXPLICITEMENT configuré par l'appelant -- aucun
+        montant n'est jamais choisi ni codé en dur ici. S'il est
+        configuré, un coût attendu supérieur bloque. Valeur fournie
+        invalide (`is_usable_credit_amount()` faux) : `ValueError`
+        immédiat. Pour tout Provider autre qu'un mock de test reconnu,
+        son absence (ou une valeur devenue inexploitable) rend toute
+        évaluation BLOCKED : le défaut `None` ne vaut jamais « sans
+        limite » sur le chemin réel.
         """
+
+        if max_cost_credits_per_request is not None and not is_usable_credit_amount(
+            max_cost_credits_per_request
+        ):
+            raise ValueError(
+                f"max_cost_credits_per_request must be a finite, "
+                f"non-negative number of credits, got "
+                f"{max_cost_credits_per_request!r}."
+            )
 
         self.provider = provider
         self.cost_service = cost_service or GenerationCostService(provider)
         self.executed_request_store = executed_request_store or InMemoryExecutedRequestStore()
         self.identity_lock = identity_lock
         self._clock = clock or _utc_now
+        self.max_cost_credits_per_request = max_cost_credits_per_request
 
     # ------------------------------------------------------------------
     # DÉCISION PRINCIPALE
@@ -430,6 +526,17 @@ class GenerationApprovalGate:
                 ],
             )
 
+        # Phase D : chemin réel non configuré -> BLOCKED avant même
+        # l'estimation du coût, quelle que soit l'approbation.
+        real_path_reasons = self._real_provider_configuration_reasons()
+        if real_path_reasons:
+            return GenerationApprovalResult(
+                decision=GenerationApprovalDecision.BLOCKED,
+                request_id=request.request_id,
+                job_type=request.job_type,
+                reasons=real_path_reasons,
+            )
+
         cost_result = self.cost_service.estimate(
             job_type=request.job_type,
             prompt=request.prompt,
@@ -448,8 +555,13 @@ class GenerationApprovalGate:
                 cost_result=cost_result,
             )
 
-        # Coût inconnu : jamais d'autorisation silencieuse.
-        if cost_result.status == CostEstimationStatus.UNKNOWN:
+        # Phase D (condition 4 de docs/phase_a_real_generation_decision.md) :
+        # un coût UNKNOWN n'est JAMAIS approuvable -- ni l'approbation
+        # explicite ni l'autorisation humaine ne peuvent le débloquer.
+        # Tout statut autre que KNOWN (y compris inattendu) est traité de
+        # même. S'il manque aussi une approbation, la décision reste
+        # NEEDS_APPROVAL (avec la raison de coût) ; sinon BLOCKED.
+        if cost_result.status != CostEstimationStatus.KNOWN:
             reasons = []
 
             if not request.approved:
@@ -461,24 +573,35 @@ class GenerationApprovalGate:
             reasons.extend(self._human_authorization_reasons(request))
             reasons.extend(self._authorization_content_reasons(request))
             reasons.extend(consumption_reasons)
-
-            if reasons:
-                return GenerationApprovalResult(
-                    decision=GenerationApprovalDecision.NEEDS_APPROVAL,
-                    request_id=request.request_id,
-                    job_type=request.job_type,
-                    reasons=reasons,
-                    cost_result=cost_result,
-                )
+            reasons.append(
+                "Cost is unknown: an estimate that is not KNOWN is never "
+                "approvable, even with explicit approval and human "
+                "authorization."
+            )
 
             return GenerationApprovalResult(
-                decision=GenerationApprovalDecision.APPROVED,
+                decision=(
+                    GenerationApprovalDecision.NEEDS_APPROVAL
+                    if len(reasons) > 1
+                    else GenerationApprovalDecision.BLOCKED
+                ),
+                request_id=request.request_id,
+                job_type=request.job_type,
+                reasons=reasons,
+                cost_result=cost_result,
+            )
+
+        # Défense en profondeur (Phase D) : un `cost_service` injecté ne
+        # peut pas faire passer pour KNOWN un montant inexploitable.
+        required = cost_result.estimate.credits if cost_result.estimate is not None else None
+        if not is_usable_credit_amount(required):
+            return GenerationApprovalResult(
+                decision=GenerationApprovalDecision.BLOCKED,
                 request_id=request.request_id,
                 job_type=request.job_type,
                 reasons=[
-                    "Cost is unknown but explicit approval and explicit "
-                    "human authorization for real generation were both "
-                    "given."
+                    f"Cost estimate {required!r} is not a finite, "
+                    f"non-negative number of credits."
                 ],
                 cost_result=cost_result,
             )
@@ -507,7 +630,20 @@ class GenerationApprovalGate:
                 cost_result=cost_result,
             )
 
-        required = cost_result.estimate.credits
+        # Phase D : un solde NaN rendrait `required > available` faux,
+        # donc approuvable -- seul un solde fini et >= 0 est comparé.
+        if not is_usable_credit_amount(available):
+            return GenerationApprovalResult(
+                decision=GenerationApprovalDecision.BLOCKED,
+                request_id=request.request_id,
+                job_type=request.job_type,
+                reasons=[
+                    f"Account balance {available!r} is not a finite, "
+                    f"non-negative number of credits; budget cannot be "
+                    f"verified."
+                ],
+                cost_result=cost_result,
+            )
 
         if required > available:
             return GenerationApprovalResult(
@@ -517,6 +653,25 @@ class GenerationApprovalGate:
                 reasons=[
                     f"Insufficient credits: {available} available < "
                     f"{required} required."
+                ],
+                cost_result=cost_result,
+                available_credits=available,
+            )
+
+        # Un plafond devenu inexploitable après la construction (NaN
+        # rendrait `required > ceiling` faux) n'est jamais comparé.
+        ceiling = self.max_cost_credits_per_request
+        if ceiling is not None and (
+            not is_usable_credit_amount(ceiling) or required > ceiling
+        ):
+            return GenerationApprovalResult(
+                decision=GenerationApprovalDecision.BLOCKED,
+                request_id=request.request_id,
+                job_type=request.job_type,
+                reasons=[
+                    f"Expected cost {required} exceeds or cannot be "
+                    f"checked against the configured per-request "
+                    f"ceiling of {ceiling!r} credits."
                 ],
                 cost_result=cost_result,
                 available_credits=available,
@@ -804,6 +959,59 @@ class GenerationApprovalGate:
                     f"match this request's live content digest '{actual}' -- "
                     f"the authorization was given for different content."
                 )
+        return reasons
+
+    # ------------------------------------------------------------------
+    # CONFIGURATION DU CHEMIN RÉEL (Phase D)
+    # ------------------------------------------------------------------
+
+    def is_recognized_test_mock(self) -> bool:
+        """Vrai UNIQUEMENT si `self.provider` est un mock de test reconnu
+        (`is_recognized_test_mock_provider()`) : c'est la seule dispense
+        de plafond et d'Identity Lock, et elle n'ouvre rien sur le chemin
+        de production. Tout le reste -- vrai Provider, ses sous-classes,
+        sous-classes du Mock, Provider inconnu, wrapper, `MagicMock` --
+        n'est jamais reconnu. Ne lève jamais d'exception."""
+
+        return is_recognized_test_mock_provider(self.provider)
+
+    def requires_real_path_protections(self) -> bool:
+        """Phase D -- fail closed : tout Provider qui n'est pas un mock de
+        test reconnu (`is_recognized_test_mock()`) exige un plafond par
+        requête explicite et un `ReleaseCandidateIdentityLock`."""
+
+        return not self.is_recognized_test_mock()
+
+    def _real_provider_configuration_reasons(self) -> List[str]:
+        """Phase D (conditions 3 et 6 de
+        docs/phase_a_real_generation_decision.md) : sur le chemin réel,
+        un plafond par requête EXPLICITEMENT configuré et exploitable
+        et un `ReleaseCandidateIdentityLock` sont obligatoires. Aucun
+        montant n'est choisi ni supposé ici ; leur absence bloque. Le
+        « chemin réel » couvre tout Provider qui n'est pas un mock de
+        test reconnu (`requires_real_path_protections()`)."""
+
+        if not self.requires_real_path_protections():
+            return []
+
+        reasons: List[str] = []
+
+        if not is_usable_credit_amount(self.max_cost_credits_per_request):
+            reasons.append(
+                f"Real or unrecognized provider path "
+                f"({type(self.provider).__name__}): no explicitly "
+                f"configured, verifiable per-request credit ceiling "
+                f"(max_cost_credits_per_request="
+                f"{self.max_cost_credits_per_request!r}); failing closed."
+            )
+
+        if not isinstance(self.identity_lock, ReleaseCandidateIdentityLock):
+            reasons.append(
+                f"Real or unrecognized provider path "
+                f"({type(self.provider).__name__}): no "
+                f"ReleaseCandidateIdentityLock configured; failing closed."
+            )
+
         return reasons
 
     # ------------------------------------------------------------------

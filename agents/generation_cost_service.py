@@ -37,10 +37,15 @@ exploitable) et une ERREUR survenue pendant l'estimation — là où
 `CostEngine.get_verified_cost()` (V1) confond ces deux derniers cas
 dans un même retour `None` (`except Exception: return None`).
 `GenerationApprovalGate` consomme aujourd'hui ce résultat typé :
-ERROR -> BLOCKED ; UNKNOWN ->
-NEEDS_APPROVAL si l'approbation explicite ou l'autorisation humaine
-explicite manque, et APPROVED seulement si les deux sont fournies
-(jamais d'autorisation silencieuse).
+ERROR -> BLOCKED ; UNKNOWN -> jamais APPROVED, même avec approbation
+explicite et autorisation humaine (Phase D, condition 4 de
+docs/phase_a_real_generation_decision.md) : NEEDS_APPROVAL s'il manque
+aussi une approbation, sinon BLOCKED.
+
+Phase D : un coût n'est « exploitable » (KNOWN) que s'il est un nombre
+réel FINI et positif ou nul (`is_usable_credit_amount()`) -- NaN, +inf,
+-inf, négatif, entier trop grand pour un `float`, booléen, chaîne ou
+tout autre type donnent UNKNOWN, jamais KNOWN.
 
 RÈGLE ABSOLUE :
 - Aucun prix n'est jamais inventé ou codé en dur ici (délégation
@@ -49,6 +54,7 @@ RÈGLE ABSOLUE :
   n'est possible via cette classe.
 """
 
+import math
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -63,6 +69,22 @@ if str(PROJECT_ROOT) not in sys.path:
 from integrations.higgsfield.errors import HiggsfieldError
 from integrations.higgsfield.provider import BaseHiggsfieldProvider
 from integrations.higgsfield.types import CostEstimate
+
+
+def is_usable_credit_amount(value: object) -> bool:
+    """Phase D — seule définition d'un montant de crédits exploitable
+    (coût, solde, plafond) : de type EXACTEMENT `int` ou `float` (ni
+    `bool`, ni sous-classe), convertible en `float` FINI (ni NaN, ni
+    ±inf, ni entier trop grand pour un `float`) et >= 0. Toute autre
+    valeur est inexploitable ; ne lève jamais d'exception."""
+
+    if type(value) not in (int, float):
+        return False
+    try:
+        as_float = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return False
+    return math.isfinite(as_float) and as_float >= 0
 
 
 class CostEstimationStatus(str, Enum):
@@ -161,6 +183,20 @@ class GenerationCostService:
                 error=str(error),
             )
 
+        if not isinstance(estimate, CostEstimate):
+            # Phase D : une réponse du Provider qui n'est pas un
+            # CostEstimate n'est jamais interprétée (ni `.credits` lu,
+            # ni AttributeError propagée) -- ERROR, donc BLOCKED.
+            return GenerationCostResult(
+                status=CostEstimationStatus.ERROR,
+                job_type=job_type,
+                message="Cost estimation returned an unexpected result.",
+                error=(
+                    f"Provider returned {type(estimate).__name__}, not a "
+                    f"CostEstimate."
+                ),
+            )
+
         if not self._is_usable_cost(estimate.credits):
             return GenerationCostResult(
                 status=CostEstimationStatus.UNKNOWN,
@@ -181,8 +217,4 @@ class GenerationCostService:
 
     @staticmethod
     def _is_usable_cost(credits: Optional[float]) -> bool:
-        return (
-            isinstance(credits, (int, float))
-            and not isinstance(credits, bool)
-            and credits >= 0
-        )
+        return is_usable_credit_amount(credits)

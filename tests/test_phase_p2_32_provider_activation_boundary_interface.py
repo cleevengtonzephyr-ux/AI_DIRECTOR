@@ -46,6 +46,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST, fixture_identity_lock_for
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import GenerationJobService
 from agents.release_candidate_identity_lock import (
@@ -254,29 +255,36 @@ class TestInterfaceAcceptsActivationSurface(_TmpDirTestCase):
 # ----------------------------------------------------------------------
 
 
-class _SpyProvider(MockHiggsfieldProvider):
-    """Enregistre les arguments exacts reçus par create_job(), sans
-    changer son comportement (délègue intégralement au Mock)."""
+_UNSET = "UNSET"
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.received_provider_activation_contract = "UNSET"
 
-    def create_job(self, job_type, prompt, provider_activation_contract=None, **params):
-        self.received_provider_activation_contract = provider_activation_contract
-        return super().create_job(
-            job_type,
-            prompt,
-            provider_activation_contract=provider_activation_contract,
-            **params,
-        )
+def _SpyProvider(**kwargs):
+    """Mock RECONNU : il enregistre déjà, pour chaque appel de
+    create_job(), les arguments exacts reçus (dont
+    `provider_activation_contract`) dans `_jobs`. Phase D : un Provider
+    qui redéfinit create_job() n'atteint plus la frontière."""
+
+    return MockHiggsfieldProvider(**kwargs)
+
+
+def _received_provider_activation_contract(provider):
+    """`provider_activation_contract` reçu par le DERNIER create_job() du
+    Mock (`UNSET` si create_job() n'a jamais été appelé)."""
+
+    if not provider._jobs:
+        return _UNSET
+    return list(provider._jobs.values())[-1]["provider_activation_contract"]
 
 
 class TestGenerationJobServiceForwardsContract(_TmpDirTestCase):
     def _spy_stack(self, cost_per_job=67.5, available_credits=100.0):
         provider = _SpyProvider(cost_per_job=cost_per_job, available_credits=available_credits)
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(provider, identity_lock=identity_lock)
+        # Phase D : plafond de FIXTURE explicite (sans effet sur le Mock
+        # reconnu) ; l'Identity Lock C est déjà configuré.
+        gate = GenerationApprovalGate(
+            provider, identity_lock=identity_lock, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST
+        )
         activation_service = RequestScopedActivationService(gate, identity_lock)
         provider_activation_service = ControlledRealProviderActivationService(
             gate, identity_lock, activation_service
@@ -306,7 +314,7 @@ class TestGenerationJobServiceForwardsContract(_TmpDirTestCase):
         )
 
         self.assertTrue(outcome.succeeded)
-        self.assertIs(provider.received_provider_activation_contract, pa_contract)
+        self.assertIs(_received_provider_activation_contract(provider), pa_contract)
 
     def test_8_execute_without_a_contract_forwards_none_unchanged_from_before(self):
         """Chemin de production actuel (director.py ne fournit jamais
@@ -323,14 +331,16 @@ class TestGenerationJobServiceForwardsContract(_TmpDirTestCase):
             ),
         )
         # Sans activation_contract/provider_activation_contract, identity
-        # lock bloquerait (request_id différent de 005) -- on désactive
-        # l'identity lock pour ce test isolé de wiring uniquement.
-        job_service.gate.identity_lock = None
+        # lock bloquerait (request_id différent de 005). Phase D : un
+        # Provider non reconnu exige un Identity Lock -- on le remplace
+        # donc par un verrou de FIXTURE lié à CETTE requête exacte
+        # (jamais supprimé) pour ce test isolé de wiring uniquement.
+        job_service.gate.identity_lock = fixture_identity_lock_for(request)
 
         outcome = job_service.execute(request, interval_seconds=0)
 
         self.assertTrue(outcome.succeeded)
-        self.assertIsNone(provider.received_provider_activation_contract)
+        self.assertIsNone(_received_provider_activation_contract(provider))
 
 
 # ----------------------------------------------------------------------
@@ -409,7 +419,13 @@ class TestRealProviderStaysDisabledAndNetworkSafe(_TmpDirTestCase):
         real_provider.get_account_balance = lambda: 1000.0
 
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(real_provider, identity_lock=identity_lock)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=identity_lock,
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         activation_service = RequestScopedActivationService(gate, identity_lock)
         provider_activation_service = ControlledRealProviderActivationService(
             gate, identity_lock, activation_service

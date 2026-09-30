@@ -145,7 +145,7 @@ class TestRuntimeNegativeCapability(unittest.TestCase):
             job_service.execute(certificate)
         with self.assertRaises(GenerationJobExecutionError):
             job_service.execute(self._request(real_generation_authorization=None))
-        self.assertEqual(created, [])
+        self.assertEqual(created, {})  # Phase D : registre `_jobs` du Mock reconnu (cf. P3.71 `_chain`)
 
 
 if __name__ == "__main__":

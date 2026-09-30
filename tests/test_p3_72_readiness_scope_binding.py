@@ -30,6 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from agents.certificate_integrity import (
     ISSUER_IDENTITY,
     IntegrityResult,
@@ -316,7 +317,9 @@ class TestStoreScopeValidation(_TempDir):
 
 class TestNegativeCapability(unittest.TestCase):
     def test_full_scope_audit_path_never_calls_create_job(self):
-        issuer, gate = _issuer()
+        # Phase D : `create_job` est remplacé sur l'instance ci-dessous (Provider
+        # alors non reconnu comme mock) -> plafond de FIXTURE explicite.
+        issuer, gate = _issuer(max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST)
         calls = []
         gate.provider.create_job = lambda *a, **k: calls.append(a) or (_ for _ in ()).throw(AssertionError)
         cert = issuer.issue(_conforming_request(), mission_id="M-A", video_plan_identity="VP-A")

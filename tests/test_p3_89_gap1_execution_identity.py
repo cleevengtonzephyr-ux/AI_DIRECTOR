@@ -47,6 +47,11 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import (
+    counting_mock_provider,
+    fixture_real_path_gate_kwargs,
+    install_create_job_probe,
+)
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import (
     CriticalStateUnknownAndUnrecordedError,
@@ -73,11 +78,18 @@ def _request(request_id="005") -> GenerationRequest:
     ))
 
 
-class _CrashDuringPollingProvider(MockHiggsfieldProvider):
-    """Le job est créé, puis le processus "meurt" pendant le polling."""
+def _CrashDuringPollingProvider(**kwargs):
+    """Le job est créé, puis le processus "meurt" pendant le polling.
+    Phase D : Mock RECONNU dont seul `wait_for_job` (hors frontière
+    `create_job`) est remplacé sur l'instance."""
 
-    def wait_for_job(self, job_id, **kwargs):
+    provider = MockHiggsfieldProvider(**kwargs)
+
+    def _crash_during_polling(job_id, **_kwargs):
         raise KeyboardInterrupt("[test] simulated crash during wait_for_job()")
+
+    provider.wait_for_job = _crash_during_polling
+    return provider
 
 
 class _FailingMarkExecutedStore(FileExecutedRequestStore):
@@ -91,10 +103,20 @@ class _Case(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
         self.state_path = self._tmp / "state" / "executed_requests.json"
 
-    def _stack(self, provider=None, store=None):
+    def _stack(self, provider=None, store=None, request_ids=None):
         provider = provider or MockHiggsfieldProvider(cost_per_job=10.0, available_credits=100.0)
         store = store or FileExecutedRequestStore(self.state_path)
-        gate = GenerationApprovalGate(provider, executed_request_store=store)
+        # Phase D : un Provider instrumenté (non reconnu comme mock) exige des
+        # fixtures EXPLICITES -- plafond + Identity Lock lié au contenu exact
+        # des `request_ids` évalués, fournis par le test lui-même.
+        fixtures = (
+            fixture_real_path_gate_kwargs(*(_request(request_id) for request_id in request_ids))
+            if request_ids is not None
+            else {}
+        )
+        gate = install_create_job_probe(
+            GenerationApprovalGate(provider, executed_request_store=store, **fixtures), provider
+        )
         job_service = GenerationJobService(
             provider, gate, lock=FileCriticalSectionLock(self._tmp / "locks")
         )
@@ -150,7 +172,8 @@ class TestNormalExecution(_Case):
 class TestCrashDuringPollingIsRecoverable(_Case):
     def test_created_job_is_findable_after_crash_and_restart(self):
         provider, _, _, job_service = self._stack(
-            provider=_CrashDuringPollingProvider(cost_per_job=10.0, available_credits=100.0)
+            provider=_CrashDuringPollingProvider(cost_per_job=10.0, available_credits=100.0),
+            request_ids=("005",),  # Phase D : fixtures explicites
         )
         with self.assertRaises(KeyboardInterrupt):
             job_service.execute(_request("005"), interval_seconds=0)
@@ -163,7 +186,8 @@ class TestCrashDuringPollingIsRecoverable(_Case):
 
     def test_recovery_reads_the_job_through_the_recorded_identity_only(self):
         provider, _, _, job_service = self._stack(
-            provider=_CrashDuringPollingProvider(cost_per_job=10.0, available_credits=100.0)
+            provider=_CrashDuringPollingProvider(cost_per_job=10.0, available_credits=100.0),
+            request_ids=("005",),  # Phase D : fixtures explicites
         )
         with self.assertRaises(KeyboardInterrupt):
             job_service.execute(_request("005"), interval_seconds=0)
@@ -233,16 +257,23 @@ class TestUnknownAndCrash(_Case):
         self.assertEqual(len(provider._jobs), 1)
 
     def test_malformed_provider_job_id_never_prevents_the_unknown_record(self):
-        class _EmptyIdProvider(MockHiggsfieldProvider):
-            def create_job(self, job_type, prompt, **params):
-                super().create_job(job_type, prompt, **params)
-                return Job(job_id="", job_type=job_type, status=JobStatus.QUEUED)
+        # Phase D : un Provider qui redéfinit create_job() n'atteint plus la
+        # frontière ; le Mock reconnu crée donc le job, et c'est la RÉPONSE
+        # qu'il renvoie (le `Job` construit par son module) qui porte un
+        # identifiant vide, pendant ce seul appel.
+        from integrations.higgsfield import mock_provider as mock_provider_module
 
-        _, _, _, job_service = self._stack(
-            provider=_EmptyIdProvider(cost_per_job=10.0, available_credits=100.0)
+        def _empty_id_job(**job_fields):
+            return Job(**{**job_fields, "job_id": ""})
+
+        provider, _, _, job_service = self._stack(
+            provider=MockHiggsfieldProvider(cost_per_job=10.0, available_credits=100.0),
+            request_ids=("005",),  # Phase D : fixtures explicites
         )
         with self.assertRaises(GenerationJobUnknownStateError):
-            job_service.execute(_request("005"), interval_seconds=0)
+            with mock.patch.object(mock_provider_module, "Job", _empty_id_job):
+                job_service.execute(_request("005"), interval_seconds=0)
+        self.assertEqual(len(provider._jobs), 1)  # le job a bien été créé
         store, gate = self._restarted_gate()
         self.assertNotIn("job_id", self._state()["unknown_requests"]["005"])
         self.assertIsNone(store.recorded_job_id("005"))
@@ -252,17 +283,20 @@ class TestUnknownAndCrash(_Case):
         # P3.91 : une exception de create_job() ne prouve pas l'absence
         # de job côté backend (P3.90 C2) -- le write-ahead reste UNKNOWN,
         # sans job_id inventé.
-        class _CreateFails(MockHiggsfieldProvider):
-            def create_job(self, job_type, prompt, **params):
-                raise ConnectionError("[test] failure before any job exists")
+        # Phase D : échec à l'instant de l'appel, porté par la sonde
+        # `gate.in_flight()` (le Mock reconnu n'est jamais redéfini).
+        def _create_fails(params):
+            raise ConnectionError("[test] failure before any job exists")
 
-        _, store, gate, job_service = self._stack(
-            provider=_CreateFails(cost_per_job=10.0, available_credits=100.0)
+        provider, store, gate, job_service = self._stack(
+            provider=counting_mock_provider(on_create=_create_fails, cost_per_job=10.0, available_credits=100.0),
+            request_ids=("005",),  # Phase D : fixtures explicites
         )
         with self.assertRaises(ConnectionError):
             job_service.execute(_request("005"), interval_seconds=0)
         self.assertIsNone(store.recorded_job_id("005"))
         self.assertEqual(gate.evaluate(_request("005")).decision, D.EXECUTION_STATE_UNKNOWN)
+        self.assertEqual(provider._jobs, {})  # aucun job n'existe
 
     def test_double_persistence_failure_still_raises_critical_error(self):
         class _BothFail(_FailingMarkExecutedStore):
@@ -351,14 +385,15 @@ class TestCrossScope(_Case):
 
 class TestConcurrency(_Case):
     def test_concurrent_executions_of_one_request_create_and_record_one_job(self):
-        class _SlowCreate(MockHiggsfieldProvider):
-            def create_job(self, job_type, prompt, **params):
-                barrier_passed.wait(timeout=5)
-                return super().create_job(job_type, prompt, **params)
-
+        # Phase D : attente à l'instant de l'appel, portée par la sonde
+        # `gate.in_flight()` (le Mock reconnu n'est jamais redéfini).
         barrier_passed = threading.Event()
         provider, store, _, job_service = self._stack(
-            provider=_SlowCreate(cost_per_job=10.0, available_credits=100.0)
+            provider=counting_mock_provider(
+                on_create=lambda params: barrier_passed.wait(timeout=5),
+                cost_per_job=10.0, available_credits=100.0,
+            ),
+            request_ids=("005",),  # Phase D : fixtures explicites
         )
         results = []
 

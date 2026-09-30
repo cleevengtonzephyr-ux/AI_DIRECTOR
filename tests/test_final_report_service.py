@@ -30,6 +30,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST, fixture_identity_lock_for
 from tests.authorization_content_helpers import bind_request, content_media
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
@@ -192,10 +193,18 @@ class TestFinalReportNeverBypassesRealProtection(unittest.TestCase):
         }
 
         real_provider = HiggsfieldProvider(client=fake_client)
-        service = FinalReportService(real_provider, GenerationApprovalGate(real_provider))
+        request = _request(approved=True)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
+        service = FinalReportService(real_provider, gate)
 
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-            service.generate(_request(approved=True))
+            service.generate(request)
 
         fake_client.create_job.assert_not_called()
 

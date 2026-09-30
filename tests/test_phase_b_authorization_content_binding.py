@@ -60,6 +60,12 @@ from agents.release_candidate_identity_lock import (
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
 from integrations.higgsfield.provider import HiggsfieldProvider
+from tests.real_provider_path_fixtures import (
+    FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+    counting_mock_provider,
+    fixture_identity_lock_for,
+    install_create_job_probe,
+)
 from tests.authorization_content_helpers import (
     REAL_AVATAR_PATH,
     REAL_FACE_PATH,
@@ -72,20 +78,24 @@ D = GenerationApprovalDecision
 CANONICAL_PROMPT = PromptAssemblySystem(PROJECT_ROOT).assemble(C.request_id)
 
 
-class _CountingProvider(MockHiggsfieldProvider):
-    """Mock : compte chaque create_job() ; peut refuser comme le vrai
-    Provider (avant tout appel client)."""
+def _counting_provider(refuse=False, **kwargs):
+    """Mock RECONNU : compte chaque create_job() ; peut refuser comme le vrai
+    Provider (avant tout appel client). Phase D : instrumentation portée
+    par `gate.in_flight()` (`install_create_job_probe()`), jamais par un
+    `create_job()` redéfini, qui n'atteindrait plus la frontière."""
 
-    def __init__(self, *args, refuse=False, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.create_calls = 0
-        self.refuse = refuse
+    return counting_mock_provider(refuse=refuse, **kwargs)
 
-    def create_job(self, job_type, prompt, **params):
-        self.create_calls += 1
-        if self.refuse:
-            raise HiggsfieldRealGenerationDisabledError("mock refusal before any client call")
-        return super().create_job(job_type, prompt, **params)
+
+def _create_calls(provider) -> int:
+    """Appels à `create_job()`. Phase D : seule une instance EXACTE de
+    `MockHiggsfieldProvider` est un mock reconnu (Gate sans plafond ni
+    Identity Lock) ; elle enregistre exactement un job simulé par appel
+    dans `_jobs`. `_counting_provider()` (refus instrumenté) garde son
+    propre compteur, tenu par `install_create_job_probe()`."""
+
+    counted = getattr(provider, "create_calls", None)
+    return counted if counted is not None else len(provider._jobs)
 
 
 class _Sandbox(unittest.TestCase):
@@ -138,33 +148,48 @@ class _Sandbox(unittest.TestCase):
 
     # --- chaînes ------------------------------------------------------
 
-    def _gate_chain(self, cost=67.5, identity_lock=False, provider=None, **provider_kwargs):
-        provider = provider or _CountingProvider(
-            cost_per_job=cost, available_credits=1000.0, **provider_kwargs
-        )
+    def _gate_chain(self, cost=67.5, identity_lock=False, provider=None,
+                    max_cost_credits_per_request=None, **provider_kwargs):
+        # Phase D : Mock RECONNU par défaut (la Gate peut rester sans Identity
+        # Lock pour isoler la liaison au contenu) ; `_CountingProvider` n'est
+        # utilisé que pour un comportement instrumenté (`refuse=...`), porté
+        # par `gate.in_flight()` (cf. `install_create_job_probe()` ci-dessous).
+        if provider is None:
+            provider = (
+                _counting_provider(cost_per_job=cost, available_credits=1000.0, **provider_kwargs)
+                if provider_kwargs
+                else MockHiggsfieldProvider(cost_per_job=cost, available_credits=1000.0)
+            )
         store = FileExecutedRequestStore(self.state_path)
         gate = GenerationApprovalGate(
             provider,
             executed_request_store=store,
-            identity_lock=ReleaseCandidateIdentityLock(C) if identity_lock else None,
+            identity_lock=(
+                ReleaseCandidateIdentityLock(C) if identity_lock is True else (identity_lock or None)
+            ),
+            max_cost_credits_per_request=max_cost_credits_per_request,
         )
+        if provider_kwargs:
+            install_create_job_probe(gate, provider)
         service = GenerationJobService(
             provider, gate, lock=FileCriticalSectionLock(self.tmp / "locks")
         )
         return provider, gate, service
 
-    def _contract_stack(self, provider=None, gate_identity_lock=True):
+    def _contract_stack(self, provider=None, gate_identity_lock=True, max_cost_credits_per_request=None):
         """`gate_identity_lock=False` : la Gate n'a pas d'Identity Lock
         (qui, sinon, refuse en premier -- INVALID_REQUEST) afin d'isoler
         la liaison autorisation <-> contenu ; les services P2.21/P2.26
         gardent le leur, obligatoire."""
 
-        provider = provider or _CountingProvider(cost_per_job=67.5, available_credits=1000.0)
+        # Phase D : Mock RECONNU par défaut (cf. `_gate_chain`).
+        provider = provider or MockHiggsfieldProvider(cost_per_job=67.5, available_credits=1000.0)
         identity_lock = ReleaseCandidateIdentityLock(C)
         gate = GenerationApprovalGate(
             provider,
             executed_request_store=FileExecutedRequestStore(self.state_path),
             identity_lock=identity_lock if gate_identity_lock else None,
+            max_cost_credits_per_request=max_cost_credits_per_request,
         )
         activation = RequestScopedActivationService(gate, identity_lock)
         provider_activation = ControlledRealProviderActivationService(
@@ -188,7 +213,7 @@ class _Sandbox(unittest.TestCase):
         return set(data["consumed_authorization_sha256"])
 
     def assertNothingHappened(self, provider, gate, *authorizations):
-        self.assertEqual(provider.create_calls, 0)
+        self.assertEqual(_create_calls(provider), 0)
         self.assertEqual(provider._jobs, {})
         for authorization in authorizations:
             self.assertFalse(gate.is_authorization_consumed(authorization.authorization_id))
@@ -294,7 +319,7 @@ class TestSeparateContentDivergence(_Sandbox):
         self.assertEqual(gate.evaluate(request).decision, D.APPROVED)
         outcome = service.execute(request, interval_seconds=0)
         self.assertTrue(outcome.succeeded)
-        self.assertEqual(provider.create_calls, 1)
+        self.assertEqual(_create_calls(provider), 1)
         self.assertEqual(self._consumed_digests(), {authorization_id_sha256(authorization.authorization_id)})
 
 
@@ -532,7 +557,7 @@ class TestProviderContractBindingAndPairConsistency(_Sandbox):
             request_b, interval_seconds=0, activation_contract=rs_b, provider_activation_contract=pa_b
         )
         self.assertTrue(outcome.succeeded)
-        self.assertEqual(provider.create_calls, 1)
+        self.assertEqual(_create_calls(provider), 1)
         self.assertEqual(outcome.job.raw["provider_activation_contract"].authorization_id, auth_b.authorization_id)
         self.assertTrue(gate.is_authorization_consumed(auth_b.authorization_id))
         self.assertFalse(gate.is_authorization_consumed(auth_a.authorization_id))
@@ -578,7 +603,7 @@ class TestCallsWithoutContracts(_Sandbox):
                 self.assertEqual(report.status, expected)
                 consumed = gate.is_authorization_consumed(authorization.authorization_id)
                 self.assertEqual(consumed, expected == FinalReportStatus.EXECUTED_PASS)
-                self.assertEqual(provider.create_calls, int(expected == FinalReportStatus.EXECUTED_PASS))
+                self.assertEqual(_create_calls(provider), int(expected == FinalReportStatus.EXECUTED_PASS))
 
 
 # ----------------------------------------------------------------------
@@ -592,7 +617,9 @@ class TestKnownAndUnknownCostApproval(_Sandbox):
             provider, gate, _ = self._gate_chain(cost=cost)
             with self.subTest(cost=label, case="all match"):
                 result = gate.evaluate(self._request())
-                self.assertEqual(result.decision, D.APPROVED)
+                # Phase D : un coût UNKNOWN n'est jamais approuvable, même
+                # quand toutes les empreintes correspondent.
+                self.assertEqual(result.decision, D.APPROVED if label == "KNOWN" else D.BLOCKED)
                 self.assertEqual(result.cost_result.status.value, label.lower())
 
             divergent = {
@@ -610,7 +637,7 @@ class TestKnownAndUnknownCostApproval(_Sandbox):
                 with self.subTest(cost=label, case=f"{field_name} missing"):
                     authorization = self._approved_authorization(**{field_name: None})
                     self.assertEqual(gate.evaluate(self._request(authorization)).decision, D.NEEDS_APPROVAL)
-            self.assertEqual(provider.create_calls, 0)
+            self.assertEqual(_create_calls(provider), 0)
 
 
 # ----------------------------------------------------------------------
@@ -628,16 +655,20 @@ class TestSingleUsePreserved(_Sandbox):
         self.assertNothingHappened(provider, gate, authorization)
 
         service.execute(self._request(authorization), interval_seconds=0)
-        self.assertEqual(provider.create_calls, 1)
+        self.assertEqual(_create_calls(provider), 1)
         self.assertEqual(self._consumed_digests(), {authorization_id_sha256(authorization.authorization_id)})
 
         self.assertEqual(gate.evaluate(self._request(authorization)).decision, D.ALREADY_EXECUTED)
         with self.assertRaises(GenerationJobExecutionError):
             service.execute(self._request(authorization), interval_seconds=0)
-        self.assertEqual(provider.create_calls, 1)
+        self.assertEqual(_create_calls(provider), 1)
 
     def test_provider_refusal_keeps_the_bound_authorization_consumed(self):
-        provider, gate, service = self._gate_chain(refuse=True)
+        # Phase D : fixtures explicites (sans effet sur le Mock reconnu,
+        # conservées) : plafond + Identity Lock (contenu canonique C).
+        provider, gate, service = self._gate_chain(
+            refuse=True, identity_lock=True, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST
+        )
         authorization = self._approved_authorization()
 
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
@@ -652,7 +683,16 @@ class TestSingleUsePreserved(_Sandbox):
         self.assertEqual(provider.create_calls, 1)
 
     def test_content_binding_does_not_make_a_consumed_authorization_reusable(self):
-        provider, gate, service = self._gate_chain(refuse=True)
+        # Phase D : fixtures explicites (sans effet sur le Mock reconnu,
+        # conservées) : plafond + Identity Lock liés aux DEUX
+        # contenus exacts évalués (canonique, puis « another prompt »).
+        provider, gate, service = self._gate_chain(
+            refuse=True,
+            identity_lock=fixture_identity_lock_for(
+                self._unbound(), self._unbound(prompt="another prompt")
+            ),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         authorization = self._approved_authorization()
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
             service.execute(self._request(authorization), interval_seconds=0)
@@ -693,7 +733,10 @@ class TestRealClientNeverReached(_Sandbox):
 
     def test_fully_bound_request_still_stops_at_the_real_provider(self):
         provider, client = self._real_provider()
-        _, gate, service = self._gate_chain(provider=provider, identity_lock=True)
+        # Phase D : plafond de FIXTURE explicite (chemin réel).
+        _, gate, service = self._gate_chain(
+            provider=provider, identity_lock=True, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST
+        )
         authorization = self._approved_authorization()
         request = self._request(authorization)
 
@@ -705,7 +748,10 @@ class TestRealClientNeverReached(_Sandbox):
 
     def test_p2_26_preparation_is_refused_against_the_real_provider(self):
         provider, client = self._real_provider()
-        _, _, activation, provider_activation, _ = self._contract_stack(provider=provider)
+        # Phase D : plafond de FIXTURE explicite (chemin réel).
+        _, _, activation, provider_activation, _ = self._contract_stack(
+            provider=provider, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST
+        )
         request = self._request()
         rs = activation.prepare_activation(request)
         with self.assertRaises(ControlledRealProviderActivationRejectedError):
@@ -714,10 +760,19 @@ class TestRealClientNeverReached(_Sandbox):
 
     def test_foreign_content_never_reaches_the_real_provider(self):
         provider, client = self._real_provider()
-        _, gate, service = self._gate_chain(provider=provider)
         authorization = self._approved_authorization()
-        with self.assertRaises(GenerationJobExecutionError):
+        # Phase D : vrai Provider -> plafond + Identity Lock EXPLICITES, ce
+        # dernier lié au contenu étranger évalué, pour que le refus vienne de
+        # la liaison autorisation <-> contenu (et non du chemin réel).
+        _, gate, service = self._gate_chain(
+            provider=provider,
+            identity_lock=fixture_identity_lock_for(self._unbound(prompt="another prompt")),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
+        with self.assertRaises(GenerationJobExecutionError) as ctx:
             service.execute(self._request(authorization, prompt="another prompt"), interval_seconds=0)
+        self.assertEqual(ctx.exception.approval.decision, D.NEEDS_APPROVAL)
+        self.assertReasonsMention(ctx.exception.approval.reasons, "given for different content")
         client.create_job.assert_not_called()
         self.assertFalse(gate.is_authorization_consumed(authorization.authorization_id))
 

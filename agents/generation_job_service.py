@@ -179,6 +179,7 @@ from agents.generation_approval_gate import (
     GenerationApprovalGate,
     GenerationApprovalResult,
     GenerationRequest,
+    may_reach_create_job,
 )
 from integrations.higgsfield.provider import BaseHiggsfieldProvider
 from integrations.higgsfield.types import Job, VideoResult
@@ -268,6 +269,20 @@ class GenerationJobExecutionError(RuntimeError):
     ):
         super().__init__(message)
         self.approval = approval
+
+
+class GenerationJobProviderNotAllowedError(GenerationJobExecutionError):
+    """
+    Phase D — Levée par `execute()` AVANT toute autre étape (contrats,
+    verrou, évaluation du Gate, consommation d'autorisation, marqueur
+    « en vol ») quand le Provider n'est pas une implémentation
+    explicitement sûre (`may_reach_create_job()` : Mock reconnu ou vrai
+    `HiggsfieldProvider` exact). Une sous-classe du vrai Provider qui
+    redéfinit `create_job()`, un wrapper ou un Provider inconnu ne peut
+    donc jamais atteindre `create_job()`, même avec plafond et Identity
+    Lock valides. Sous-classe de `GenerationJobExecutionError` :
+    NOT_EXECUTED pour `FinalReportService.generate()`.
+    """
 
 
 class GenerationJobActivationRejectedError(GenerationJobExecutionError):
@@ -420,7 +435,22 @@ class GenerationJobService:
         APRÈS `activation_contract` et AVANT `create_job()` -- exige
         `activation_contract` également fourni (ce contrat P2.26 est
         toujours lié à un contrat P2.21 précis, jamais autonome).
+
+        Phase D : AVANT toute autre étape, `self.provider` doit être une
+        implémentation explicitement sûre (`may_reach_create_job()`),
+        sinon `GenerationJobProviderNotAllowedError` -- rien n'est
+        évalué, consommé ni écrit.
         """
+
+        if not may_reach_create_job(self.provider):
+            raise GenerationJobProviderNotAllowedError(
+                f"Cannot execute job for request '{request.request_id}': "
+                f"provider {type(self.provider).__name__} is not an "
+                f"explicitly safe implementation (recognized test mock "
+                f"or the exact, unconditionally disabled "
+                f"HiggsfieldProvider) -- subclasses, wrappers and unknown "
+                f"providers never reach create_job() (fail closed)."
+            )
 
         if activation_contract is not None and self.activation_service is None:
             raise ValueError(

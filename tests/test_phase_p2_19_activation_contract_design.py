@@ -47,6 +47,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from agents.release_candidate_identity_lock import (
@@ -327,7 +328,13 @@ class TestJ_CompleteContractStillCannotCreateRealJob(unittest.TestCase):
 
         real_provider = HiggsfieldProvider(client=fake_client)
         lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(real_provider, identity_lock=lock)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=lock,
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         service = GenerationJobService(real_provider, gate)
 
         request = _conforming_request(real_generation_authorization=_valid_auth())

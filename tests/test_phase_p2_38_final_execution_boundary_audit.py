@@ -41,6 +41,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import (
     GenerationJobService,
@@ -102,7 +103,8 @@ def _conforming_request(**overrides) -> GenerationRequest:
 
 
 class _Stack:
-    def __init__(self, tmp_dir: Path, cost_per_job=67.5, available_credits=100.0, provider=None):
+    def __init__(self, tmp_dir: Path, cost_per_job=67.5, available_credits=100.0, provider=None,
+                 max_cost_credits_per_request=None):
         self.provider = provider or MockHiggsfieldProvider(
             cost_per_job=cost_per_job, available_credits=available_credits
         )
@@ -117,6 +119,7 @@ class _Stack:
                 Path(tempfile.mkdtemp(prefix="state_", dir=tmp_dir)) / "executed_requests.json"
             ),
             identity_lock=self.identity_lock,
+            max_cost_credits_per_request=max_cost_credits_per_request,
         )
         self.activation_service = RequestScopedActivationService(self.gate, self.identity_lock)
         self.provider_activation_service = ControlledRealProviderActivationService(
@@ -160,14 +163,12 @@ class _TmpDirTestCase(unittest.TestCase):
         return _Stack(self._tmp, **kwargs)
 
 
-class _SpyProvider(MockHiggsfieldProvider):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.create_job_call_count = 0
+def _SpyProvider(**kwargs):
+    """Mock RECONNU : chaque appel de create_job() est enregistré dans
+    `_jobs`. Phase D : un Provider qui redéfinit create_job() n'atteint
+    plus la frontière."""
 
-    def create_job(self, *args, **kwargs):
-        self.create_job_call_count += 1
-        return super().create_job(*args, **kwargs)
+    return MockHiggsfieldProvider(**kwargs)
 
 
 # ------------------------------------------------------------------ #
@@ -381,7 +382,11 @@ class Test10_P226(_TmpDirTestCase):
 
 class Test11_ExecutionGate(_TmpDirTestCase):
     def test_gate_approved_does_not_itself_call_create_job(self):
-        stack = self._stack(provider=_SpyProvider(cost_per_job=67.5, available_credits=100.0))
+        # Phase D : plafond de FIXTURE explicite (sans effet sur le Mock reconnu).
+        stack = self._stack(
+            provider=_SpyProvider(cost_per_job=67.5, available_credits=100.0),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         stack.execution_gate = RealProviderExecutionGate(
             stack.gate, stack.identity_lock, stack.activation_service,
             stack.provider_activation_service, job_service=stack.job_service,
@@ -392,7 +397,7 @@ class Test11_ExecutionGate(_TmpDirTestCase):
             request, activation_contract=rs, provider_activation_contract=pa
         )
         self.assertEqual(report.decision, RealProviderExecutionDecision.APPROVED)
-        self.assertEqual(stack.provider.create_job_call_count, 0)
+        self.assertEqual(len(stack.provider._jobs), 0)
 
     def test_gate_module_has_zero_create_job_calls_in_its_own_source(self):
         text = (PROJECT_ROOT / "agents" / "real_provider_execution_gate.py").read_text(
@@ -434,7 +439,8 @@ class Test12_13_ProviderDisabledClientInaccessible(_TmpDirTestCase):
         )
         real_provider.get_account_balance = lambda: 1000.0
 
-        stack = self._stack(provider=real_provider)
+        # Phase D : plafond de FIXTURE explicite (chemin réel).
+        stack = self._stack(provider=real_provider, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST)
         request = _conforming_request()
 
         self.assertEqual(stack.gate.evaluate(request).decision.value, "APPROVED")
@@ -516,7 +522,11 @@ class Test14_CallSiteInvariant(unittest.TestCase):
 
 class Test15_16_ReplayUnknown(_TmpDirTestCase):
     def test_already_executed_never_calls_create_job(self):
-        stack = self._stack(provider=_SpyProvider(cost_per_job=67.5, available_credits=100.0))
+        # Phase D : plafond de FIXTURE explicite (sans effet sur le Mock reconnu).
+        stack = self._stack(
+            provider=_SpyProvider(cost_per_job=67.5, available_credits=100.0),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         stack.job_service = GenerationJobService(
             stack.provider, stack.gate, lock=stack.lock,
             activation_service=stack.activation_service,
@@ -527,7 +537,7 @@ class Test15_16_ReplayUnknown(_TmpDirTestCase):
         stack.job_service.execute(
             request, interval_seconds=0, activation_contract=rs, provider_activation_contract=pa
         )
-        self.assertEqual(stack.provider.create_job_call_count, 1)
+        self.assertEqual(len(stack.provider._jobs), 1)
 
         with self.assertRaises(ActivationRejectedError):
             stack.activation_service.prepare_activation(
@@ -537,7 +547,7 @@ class Test15_16_ReplayUnknown(_TmpDirTestCase):
                     )
                 )
             )
-        self.assertEqual(stack.provider.create_job_call_count, 1)
+        self.assertEqual(len(stack.provider._jobs), 1)
 
     def test_unknown_request_never_calls_create_job(self):
         provider = _SpyProvider(cost_per_job=67.5, available_credits=100.0)
@@ -547,7 +557,7 @@ class Test15_16_ReplayUnknown(_TmpDirTestCase):
 
         decision = stack.gate.evaluate(request).decision
         self.assertEqual(decision, GenerationApprovalDecision.EXECUTION_STATE_UNKNOWN)
-        self.assertEqual(provider.create_job_call_count, 0)
+        self.assertEqual(len(provider._jobs), 0)
 
 
 # ------------------------------------------------------------------ #
