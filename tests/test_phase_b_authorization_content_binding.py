@@ -51,7 +51,7 @@ from agents.generation_job_service import (
     GenerationJobProviderActivationRejectedError,
     GenerationJobService,
 )
-from agents.generation_job_service import _sha256_of_file_or_none as job_service_file_sha256
+import agents.generation_job_service as job_service_module
 from agents.prompt_assembly_system import PromptAssemblySystem
 from agents.release_candidate_identity_lock import (
     ReleaseCandidateIdentityLock,
@@ -242,10 +242,13 @@ class TestDigestConsistencyAcrossLayers(_Sandbox):
         )
 
     def test_same_file_digest_as_job_service_and_p2_26(self):
+        # Phase E2 : `GenerationJobService` n'a plus de fonction de hachage
+        # propre -- il transmet les valeurs de `authorization_content_digests()`
+        # elles-mêmes (cf. tests/test_phase_e2_final_content_verification.py).
+        self.assertIs(job_service_module.authorization_content_digests, authorization_content_digests)
+        self.assertFalse(hasattr(job_service_module, "_sha256_of_file_or_none"))
         digests = authorization_content_digests(self._unbound())
-        self.assertEqual(digests["avatar_sha256"], job_service_file_sha256(str(self.avatar)))
         self.assertEqual(digests["avatar_sha256"], p2_26_file_sha256(str(self.avatar)))
-        self.assertEqual(digests["face_reference_sha256"], job_service_file_sha256(str(self.face)))
         self.assertEqual(digests["face_reference_sha256"], p2_26_file_sha256(str(self.face)))
 
     def test_missing_or_unreadable_content_yields_none_never_a_value(self):

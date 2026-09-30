@@ -150,13 +150,44 @@ CONTROLLED REAL-PROVIDER ACTIVATION WIRING (Phase P2.27) :
   lui-même reste, de toute façon, inconditionnellement désactivé et
   n'est ni modifié ni contourné : double garde-fou, jamais un
   remplacement de l'autre.
+
+VÉRIFICATION FINALE DU CONTENU (Phase E2, limite A2-c de
+docs/phase_e_authorization_limits_ceiling_revocation_shutdown_design.md) :
+- Avant E2, `execute()` recalculait les empreintes de l'avatar et de la
+  référence visage AU MOMENT de `create_job()`, après la consommation de
+  l'autorisation et le marqueur « en vol », sans les comparer à rien : un
+  fichier remplacé entre la vérification du Gate et ce recalcul était
+  transmis sous une empreinte jamais autorisée, autorisation déjà brûlée.
+- Désormais, DANS le verrou, APRÈS le Gate et l'inspection du contrat
+  P2.21, et AVANT toute consommation (contrats P2.26 et P2.21,
+  autorisation) et avant le marqueur « en vol »,
+  `authorization_content_digests(request)` est calculé UNE dernière fois
+  et comparé aux empreintes portées par l'autorisation que le Gate vient
+  d'approuver. Contenu absent, illisible ou différent ->
+  `GenerationJobContentChangedError` : rien n'est consommé, rien n'est
+  écrit, `create_job()` n'est jamais appelé.
+- Les valeurs transmises à `create_job()` sont EXACTEMENT celles de ce
+  dernier contrôle : ce module ne relit plus aucun fichier ensuite.
+- Avec un contrat P2.26, `ControlledRealProviderActivationService.
+  validate()` intervient APRÈS ce contrôle, parce qu'il consomme le
+  contrat P2.26 dans le même appel que sa validation (le placer avant
+  brûlerait ce contrat à chaque refus). Il relit lui-même les fichiers et
+  les compare au contrat et à l'autorisation : il ne peut que refuser,
+  sans rien consommer. S'il accepte, les valeurs qu'il a vérifiées sont
+  égales à celles du dernier contrôle (toutes égales à l'autorisation).
+- LIMITE : un remplacement de fichier APRÈS ce dernier contrôle (et, avec
+  un contrat P2.26, après sa validation) n'est pas détecté.
+  `create_job()` reçoit des empreintes, jamais le contenu des fichiers :
+  ce contrôle garantit la cohérence entre ce qui est autorisé et ce qui
+  est transmis, pas celle d'octets qu'un futur Provider lirait lui-même
+  depuis le disque. Le verrou de section critique (par `request_id`) ne
+  protège aucun fichier d'asset.
 """
 
-import hashlib
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -175,50 +206,57 @@ from agents.controlled_real_provider_activation import (
 )
 from agents.critical_section_lock import NoOpCriticalSectionLock
 from agents.generation_approval_gate import (
+    AUTHORIZATION_CONTENT_DIGEST_FIELDS,
     GenerationApprovalDecision,
     GenerationApprovalGate,
     GenerationApprovalResult,
     GenerationRequest,
+    RealGenerationAuthorization,
+    authorization_content_digests,
     may_reach_create_job,
 )
 from integrations.higgsfield.provider import BaseHiggsfieldProvider
 from integrations.higgsfield.types import Job, VideoResult
 
 
-def _sha256_of_file_or_none(path: Optional[str]) -> Optional[str]:
+def _final_content_violations(request: GenerationRequest, live_digests: dict) -> List[str]:
     """
-    Phase P2.35 — recalcule le SHA-256 depuis le FICHIER RÉEL, jamais
-    une valeur déclarée. `None` si le fichier est absent/illisible ou
-    si `path` est `None` -- jamais une exception, jamais une valeur
-    inventée. Logique de hachage identique à `AssetPreparationSystem.
-    calculate_hash()`, `agents/release_candidate_identity_lock.py::
-    _sha256_of_file()` et `agents/controlled_real_provider_activation.
-    py::_sha256_of_file_or_none()` -- délibérément dupliquée ici (même
-    convention déjà établie par ces deux modules) plutôt que
-    ré-instanciée, pour ne pas coupler ce module à leurs effets de bord.
+    Phase E2 — compare `live_digests` (empreintes du contenu de `request`
+    calculées à l'instant du dernier contrôle, par
+    `authorization_content_digests()`, la fonction même du Gate) aux
+    empreintes portées par l'autorisation de la requête. Même contrat que
+    `GenerationApprovalGate._authorization_content_reasons()` : les trois
+    empreintes (prompt, avatar, référence visage) sont obligatoires -- le
+    Gate n'approuve jamais une autorisation à qui il en manque une, ni un
+    contenu absent ou illisible (`None`). Aucune n'est donc optionnelle
+    ici : `None` n'est jamais une valeur autorisée. Liste vide == contenu
+    identique à celui autorisé. Ne lit aucun fichier, ne décide rien.
     """
 
-    if path is None:
-        return None
+    auth = request.real_generation_authorization
+    if not isinstance(auth, RealGenerationAuthorization):
+        return [
+            f"request '{request.request_id}' carries no "
+            f"RealGenerationAuthorization to compare its content against."
+        ]
 
-    try:
-        sha256 = hashlib.sha256()
-        with Path(path).open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                sha256.update(chunk)
-        return sha256.hexdigest()
-    except OSError:
-        return None
-
-
-def _face_reference_sha256_or_none(request: GenerationRequest) -> Optional[str]:
-    """Phase P2.35 — SHA-256 réel du premier `image_references` de rôle
-    "face_reference" porté par `request`, jamais une valeur déclarée."""
-
-    for ref in request.image_references:
-        if ref.role == "face_reference":
-            return _sha256_of_file_or_none(ref.source)
-    return None
+    reasons: List[str] = []
+    for name in AUTHORIZATION_CONTENT_DIGEST_FIELDS:
+        authorized = getattr(auth, name)
+        actual = live_digests.get(name)
+        if actual is None:
+            reasons.append(
+                f"{name} cannot be verified at the final check: the "
+                f"corresponding content of request '{request.request_id}' "
+                f"is missing or unreadable."
+            )
+        elif authorized != actual:
+            reasons.append(
+                f"{name} '{actual}' at the final check does not match the "
+                f"authorized digest {authorized!r} -- the content changed "
+                f"after the Gate verified it."
+            )
+    return reasons
 
 
 class GenerationJobUnknownStateError(RuntimeError):
@@ -283,6 +321,31 @@ class GenerationJobProviderNotAllowedError(GenerationJobExecutionError):
     Lock valides. Sous-classe de `GenerationJobExecutionError` :
     NOT_EXECUTED pour `FinalReportService.generate()`.
     """
+
+
+class GenerationJobContentChangedError(GenerationJobExecutionError):
+    """
+    Phase E2 — Levée par `execute()` quand, au dernier contrôle (après le
+    Gate et l'inspection du contrat P2.21, avant toute consommation et
+    avant le marqueur « en vol »), le contenu de la requête n'est plus celui que porte
+    l'autorisation : fichier avatar ou référence visage remplacé,
+    supprimé ou illisible depuis la vérification du Gate. Rien n'a été
+    consommé ni écrit, `create_job()` n'a pas été appelé. Sous-classe de
+    `GenerationJobExecutionError` : NOT_EXECUTED pour
+    `FinalReportService.generate()`.
+
+    `approval` porte la décision du Gate (APPROVED : c'est APRÈS elle que
+    le contenu a changé) ; `reasons` la liste exhaustive des écarts.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        approval: Optional[GenerationApprovalResult] = None,
+        reasons: Optional[List[str]] = None,
+    ):
+        super().__init__(message, approval=approval)
+        self.reasons = list(reasons or [])
 
 
 class GenerationJobActivationRejectedError(GenerationJobExecutionError):
@@ -440,6 +503,13 @@ class GenerationJobService:
         implémentation explicitement sûre (`may_reach_create_job()`),
         sinon `GenerationJobProviderNotAllowedError` -- rien n'est
         évalué, consommé ni écrit.
+
+        Phase E2 : DANS le verrou, après le Gate et l'inspection du
+        contrat P2.21 et avant toute consommation (y compris celle du
+        contrat P2.26 par sa validation), le contenu est vérifié une
+        dernière fois contre l'autorisation (`GenerationJobContentChangedError`
+        sinon) ; `create_job()` reçoit exactement les empreintes de ce
+        contrôle (cf. docstring de module pour la limite restante).
         """
 
         if not may_reach_create_job(self.provider):
@@ -526,6 +596,31 @@ class GenerationJobService:
                         ),
                     )
 
+            # Phase E2 : DERNIER contrôle du contenu par ce module -- après
+            # le Gate et l'inspection (non mutante) du contrat P2.21, AVANT
+            # toute consommation : `provider_activation_service.validate()`
+            # juste en dessous consomme le contrat P2.26 DANS le même appel
+            # que sa validation, ce contrôle doit donc le précéder pour
+            # qu'un refus ne brûle rien (contrats P2.21/P2.26, autorisation,
+            # marqueur « en vol »). Dernière lecture des fichiers par ce
+            # module : les valeurs vérifiées ici sont celles transmises à
+            # `create_job()` plus bas, jamais recalculées. Un remplacement
+            # postérieur n'est détecté que par `validate()` (P2.26), qui
+            # relit les fichiers et ne peut que refuser ; au-delà, il ne
+            # l'est pas (cf. docstring de module).
+            verified_digests = authorization_content_digests(request)
+            content_violations = _final_content_violations(request, verified_digests)
+            if content_violations:
+                raise GenerationJobContentChangedError(
+                    f"Cannot execute job for request "
+                    f"'{request.request_id}': its content no longer "
+                    f"matches the authorization at the final check, "
+                    f"before any consumption. Reasons: "
+                    f"{'; '.join(content_violations)}",
+                    approval=approval,
+                    reasons=content_violations,
+                )
+
             if provider_activation_contract is not None:
                 try:
                     self.provider_activation_service.validate(
@@ -569,10 +664,10 @@ class GenerationJobService:
             #
             # Phase P2.35 : `request_id`/`avatar_sha256`/`face_reference_
             # sha256` sont désormais ÉGALEMENT transmis explicitement --
-            # calculés ICI, EN DIRECT, depuis la `GenerationRequest`
-            # RÉELLEMENT évaluée par ce `execute()` (jamais mis en
-            # cache, jamais réutilisés d'un appel précédent) -- afin que
-            # le Provider puisse comparer ces valeurs LIVE à celles
+            # calculés EN DIRECT, depuis la `GenerationRequest`
+            # RÉELLEMENT évaluée par ce `execute()` (jamais réutilisés
+            # d'un appel précédent) -- afin que le Provider puisse
+            # comparer ces valeurs LIVE à celles
             # portées par `provider_activation_contract`, comme une
             # couche de vérification supplémentaire et INDÉPENDANTE à sa
             # propre frontière (cf. integrations/higgsfield/provider.py).
@@ -580,6 +675,9 @@ class GenerationJobService:
             # néanmoins INCONDITIONNELLEMENT bloqué -- ce transfert
             # prépare uniquement l'interface pour une future phase
             # explicitement autorisée.
+            # Phase E2 : ces deux empreintes sont celles de
+            # `verified_digests` (dernier contrôle ci-dessus), plus
+            # recalculées ici après la consommation.
             # Phase P3.91 (RISK #1 de P3.90) : write-ahead DURABLE avant
             # `create_job()`. Tant que `mark_executed()` ne l'a pas
             # remplacé (même écriture atomique), ce marqueur est lu comme
@@ -609,10 +707,8 @@ class GenerationJobService:
                     prompt=request.prompt,
                     provider_activation_contract=provider_activation_contract,
                     request_id=request.request_id,
-                    avatar_sha256=_sha256_of_file_or_none(
-                        request.start_image.source if request.start_image else None
-                    ),
-                    face_reference_sha256=_face_reference_sha256_or_none(request),
+                    avatar_sha256=verified_digests["avatar_sha256"],
+                    face_reference_sha256=verified_digests["face_reference_sha256"],
                     **job_params,
                 )
 
