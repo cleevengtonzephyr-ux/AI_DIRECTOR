@@ -96,6 +96,22 @@ APPROVED` et même `activation_decision == APPROVED` ne permettent
 donc TOUJOURS PAS, à eux seuls, de conclure qu'une génération a eu
 lieu : `job_created`/`real_provider_called` restent la seule preuve.
 
+Phase E2 — REFUS AU DERNIER CONTRÔLE DU CONTENU
+(`GenerationJobContentChangedError`, cf. agents/generation_job_service.py) :
+ce refus survient APRÈS le Gate et l'inspection du contrat P2.21, et
+AVANT la validation du contrat P2.26. Le rapport reflète exactement ce
+qui a été évalué à cet instant, jamais davantage :
+- `activation_decision` : `APPROVED` si un `activation_contract` a été
+  fourni (il a été inspecté et accepté, puis n'a PAS été consommé) ;
+  `NOT_EVALUATED` si aucun n'a été fourni. Même lecture que pour un rejet
+  P2.26 : `APPROVED` décrit la décision du niveau P2.21, pas une
+  exécution.
+- `provider_activation_decision` : toujours `NOT_EVALUATED`, même si un
+  `provider_activation_contract` a été fourni -- sa validation n'a pas
+  eu lieu.
+- `status` reste `NOT_EXECUTED`, `job_created` reste `False`, et
+  `summary` porte les raisons du refus de contenu.
+
 MISSION_ID -- OBSERVABILITY METADATA ONLY (Phase P3.34, additive):
 `mission_id` (optional, default `None`) is a pure passthrough value,
 never read, inspected, or branched on anywhere in this module. It is
@@ -133,6 +149,7 @@ from agents.generation_approval_gate import (
 from agents.generation_cost_service import CostEstimationStatus
 from agents.generation_job_service import (
     GenerationJobActivationRejectedError,
+    GenerationJobContentChangedError,
     GenerationJobExecutionError,
     GenerationJobProviderActivationRejectedError,
     GenerationJobService,
@@ -306,6 +323,13 @@ class FinalReportService:
         correspond exactement à ce niveau ; `NOT_EVALUATED` sinon, y
         compris quand un contrat était fourni mais qu'un niveau
         antérieur a refusé avant même de l'atteindre.
+
+        Phase E2 : `GenerationJobContentChangedError` (refus au dernier
+        contrôle du contenu, après l'inspection du contrat P2.21 et
+        avant la validation P2.26) donne `activation_decision=APPROVED`
+        si un `activation_contract` a été fourni (inspecté et accepté,
+        non consommé), `NOT_EVALUATED` sinon ; `provider_activation_
+        decision` reste `NOT_EVALUATED` (cf. docstring de module).
         """
 
         try:
@@ -332,7 +356,17 @@ class FinalReportService:
             # l'activation P2.21 a été évaluée et acceptée (sinon
             # GenerationJobProviderActivationRejectedError ne serait
             # jamais levée -- cf. agents/generation_job_service.py).
-            if is_provider_activation_rejection:
+            #
+            # Phase E2 : un refus au dernier contrôle du contenu survient
+            # APRÈS l'inspection du contrat P2.21 (s'il a été fourni, il a
+            # donc été accepté -- et n'a pas été consommé) et AVANT la
+            # validation P2.26, qui reste NOT_EVALUATED ci-dessous.
+            activation_accepted_before_content_refusal = (
+                isinstance(error, GenerationJobContentChangedError)
+                and activation_contract is not None
+            )
+
+            if is_provider_activation_rejection or activation_accepted_before_content_refusal:
                 activation_decision = ActivationDecision.APPROVED
             elif is_activation_rejection:
                 activation_decision = ActivationDecision.REJECTED
@@ -369,6 +403,14 @@ class FinalReportService:
                     f"Generation NOT executed for request "
                     f"'{request.request_id}': Gate {approval.decision.value} "
                     f"but activation REJECTED. {error}"
+                )
+            elif activation_accepted_before_content_refusal:
+                summary = (
+                    f"Generation NOT executed for request "
+                    f"'{request.request_id}': Gate {approval.decision.value}, "
+                    f"activation APPROVED (not consumed), but the final "
+                    f"content check REFUSED before any provider activation "
+                    f"validation. {error}"
                 )
             else:
                 summary = (
