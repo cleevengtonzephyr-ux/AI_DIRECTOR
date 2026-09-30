@@ -59,6 +59,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import GenerationJobService
 from agents.production_activation_readiness_certificate import (
@@ -210,16 +211,13 @@ class TestRuntimeBoundary(unittest.TestCase):
 
     def _chain(self):
         provider = MockHiggsfieldProvider(cost_per_job=67.5, available_credits=1000.0)
-        created = []
-        original = provider.create_job
-
-        def spy(*args, **kwargs):
-            created.append(1)
-            return original(*args, **kwargs)
-
-        provider.create_job = spy
+        # Phase D : le Mock reconnu enregistre chaque appel de create_job()
+        # dans `_jobs` (un spy remplaçant create_job sur l'instance le
+        # rendrait non reconnu, donc refusé avant create_job).
+        created = provider._jobs
         lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(provider, identity_lock=lock)
+        # Phase D : plafond de FIXTURE explicite (sans effet sur le Mock reconnu).
+        gate = GenerationApprovalGate(provider, identity_lock=lock, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST)
         activation = RequestScopedActivationService(gate, lock)
         provider_activation = ControlledRealProviderActivationService(gate, lock, activation)
         job_service = GenerationJobService(provider, gate, activation_service=activation, provider_activation_service=provider_activation)
@@ -274,7 +272,7 @@ class TestRuntimeBoundary(unittest.TestCase):
                     gate, activation, job_service, report_service, _ev, created = self._chain()
                     with self.assertRaises(Exception):
                         attempt(gate, activation, job_service, report_service)
-                    self.assertEqual(created, [])
+                    self.assertEqual(created, {})
                     self.assertFalse(gate.executed_request_store.is_executed(C.request_id))
 
     def test_prepare_activation_ignores_certificate_information(self):

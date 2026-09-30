@@ -52,6 +52,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import (
     CriticalStateUnknownAndUnrecordedError,
@@ -120,7 +121,8 @@ class _Stack:
     negative-path tests (which use a MagicMock client, never a real
     subprocess)."""
 
-    def __init__(self, tmp_dir: Path, cost_per_job=67.5, available_credits=SIMULATED_SUFFICIENT_BALANCE, provider=None):
+    def __init__(self, tmp_dir: Path, cost_per_job=67.5, available_credits=SIMULATED_SUFFICIENT_BALANCE, provider=None,
+                 max_cost_credits_per_request=None):
         self.provider = provider or MockHiggsfieldProvider(
             cost_per_job=cost_per_job, available_credits=available_credits
         )
@@ -135,6 +137,7 @@ class _Stack:
                 Path(tempfile.mkdtemp(prefix="state_", dir=tmp_dir)) / "executed_requests.json"
             ),
             identity_lock=self.identity_lock,
+            max_cost_credits_per_request=max_cost_credits_per_request,
         )
         self.activation_service = RequestScopedActivationService(self.gate, self.identity_lock)
         self.provider_activation_service = ControlledRealProviderActivationService(
@@ -650,7 +653,8 @@ class Test22_23_RealProviderNegativePath(_TmpDirTestCase):
         )
         real_provider.get_account_balance = lambda: 1000.0  # simulated-sufficient, never real
 
-        stack = self._stack(provider=real_provider)
+        # Phase D : plafond de FIXTURE explicite (chemin réel).
+        stack = self._stack(provider=real_provider, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST)
         request = _conforming_request()
 
         self.assertEqual(stack.gate.evaluate(request).decision.value, "APPROVED")

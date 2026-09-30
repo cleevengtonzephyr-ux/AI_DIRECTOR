@@ -57,6 +57,7 @@ from agents.generation_approval_gate import (
     GenerationApprovalGate,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import fixture_ceiling_on_director_gate
 from tests.authorization_content_helpers import video_005_authorization
 from agents.generation_job_service import GenerationJobService
 from agents.release_candidate_identity_lock import (
@@ -276,7 +277,8 @@ class TestDoubleConsent(P2_29_TestCase):
         director.higgsfield = _fake_client(cost=10.0, balance=100.0)
         # report_service=None -> chaîne réelle (HiggsfieldProvider réel) ;
         # Phase B : ses chemins persistants redirigés vers self._tmp.
-        with isolated_director_state(self._tmp):
+        # Phase D : plafond de FIXTURE explicite sur la Gate du Director.
+        with isolated_director_state(self._tmp), fixture_ceiling_on_director_gate():
             with self.assertRaises(ControlledRealProviderActivationRejectedError):
                 director.prepare_real_generation_activation(
                     video_id="005", title="t", hook="h", objective="o",
@@ -392,7 +394,8 @@ class TestRealProviderNegativePath(unittest.TestCase):
         # dossier temporaire (jamais le `state/` réel).
         tmp = Path(tempfile.mkdtemp(prefix="p2_29_director_"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        with isolated_director_state(tmp):
+        # Phase D : plafond de FIXTURE explicite sur la Gate du Director.
+        with isolated_director_state(tmp), fixture_ceiling_on_director_gate():
             with self.assertRaises(ControlledRealProviderActivationRejectedError):
                 director.prepare_real_generation_activation(
                     video_id="005", title="t", hook="h", objective="o",

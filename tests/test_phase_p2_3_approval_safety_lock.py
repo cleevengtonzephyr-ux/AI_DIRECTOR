@@ -23,6 +23,7 @@ pour masquer ou contourner un problème de sécurité.
 Aucun appel CLI réel, aucune génération, aucun crédit consommé.
 """
 
+import dataclasses
 import inspect
 import sys
 import unittest
@@ -34,6 +35,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.authorization_content_helpers import content_media
+from tests.real_provider_path_fixtures import fixture_real_path_gate_kwargs
 from agents.generation_approval_gate import (
     GenerationApprovalDecision,
     GenerationApprovalGate,
@@ -47,6 +50,7 @@ from agents.production_model import PRODUCTION_MODEL
 from agents.task_manager import TaskManager
 from agents.video_agent import VideoAgent
 from director import AIDirector
+from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
 from integrations.higgsfield.provider import BaseHiggsfieldProvider
 from integrations.higgsfield.types import CostEstimate, Job, JobStatus, ModelParam, ModelSchema, VideoResult
 
@@ -69,6 +73,8 @@ class _KnownCostSufficientBudgetProvider(BaseHiggsfieldProvider):
             params=(
                 ModelParam(name="prompt", type="string", required=True),
                 ModelParam(name="duration", type="integer", required=False, default=5),
+                ModelParam(name="start_image", type="object|null", required=False),
+                ModelParam(name="image_references", type="array", required=False),
             ),
         )
 
@@ -149,25 +155,33 @@ class TestKnownCostSufficientBudgetStillRequiresExplicitApproval(unittest.TestCa
 
     def test_gate_returns_needs_approval_not_approved(self):
         provider = _KnownCostSufficientBudgetProvider()
-        gate = GenerationApprovalGate(provider)
+        # Phase D : Provider instrumenté (non reconnu comme mock) -> fixtures
+        # EXPLICITES : plafond + Identity Lock lié au contenu exact.
+        request = dataclasses.replace(_known_cost_request(approved=False), **content_media())
+        gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(request))
 
-        result = gate.evaluate(_known_cost_request(approved=False))
+        result = gate.evaluate(request)
 
         self.assertEqual(result.decision, GenerationApprovalDecision.NEEDS_APPROVAL)
         self.assertNotEqual(result.decision, GenerationApprovalDecision.APPROVED)
 
     def test_job_service_never_creates_a_job_without_explicit_approval(self):
-        provider = _KnownCostSufficientBudgetProvider()
-        gate = GenerationApprovalGate(provider)
+        # Phase D : même coût CONNU (10) et même budget SUFFISANT (1000), sur
+        # le Mock reconnu -- seul Provider de test que `execute()` laisse
+        # atteindre `create_job()` ; chaque appel y serait enregistré dans
+        # `_jobs`. Fixtures explicites conservées (sans effet sur ce Mock).
+        provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=1000.0)
+        request = dataclasses.replace(_known_cost_request(approved=False), **content_media())
+        gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(request))
         job_service = GenerationJobService(provider, gate)
 
         with self.assertRaises(GenerationJobExecutionError) as ctx:
-            job_service.execute(_known_cost_request(approved=False))
+            job_service.execute(request)
 
         self.assertEqual(
             ctx.exception.approval.decision, GenerationApprovalDecision.NEEDS_APPROVAL
         )
-        self.assertEqual(provider.create_job_call_count, 0)
+        self.assertEqual(len(provider._jobs), 0)
 
     def test_explicit_approval_alone_does_not_bypass_a_real_budget_block(self):
         # Utilisation légitime de approved=True : ce scénario DOIT rester
@@ -179,11 +193,16 @@ class TestKnownCostSufficientBudgetStillRequiresExplicitApproval(unittest.TestCa
                 return 0.0
 
         provider = _InsufficientBudgetProvider()
-        gate = GenerationApprovalGate(provider)
+        # Phase D : Provider non reconnu comme mock -> fixtures EXPLICITES
+        # (plafond + Identity Lock) pour que la Gate refuse pour la raison
+        # testée, et non faute de configuration du chemin réel.
+        request = dataclasses.replace(_known_cost_request(approved=True), **content_media())
+        gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(request))
 
-        result = gate.evaluate(_known_cost_request(approved=True))
+        result = gate.evaluate(request)
 
         self.assertEqual(result.decision, GenerationApprovalDecision.BLOCKED)
+        self.assertTrue(any("Insufficient credits" in r for r in result.reasons), result.reasons)
         self.assertEqual(provider.create_job_call_count, 0)
 
 

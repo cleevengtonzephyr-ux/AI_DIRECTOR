@@ -35,6 +35,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST, fixture_identity_lock_for
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from agents.planner import VideoPlanner
@@ -234,15 +235,20 @@ class TestG_RealProviderStillDisabledRegardlessOfAuthorization(unittest.TestCase
         }
 
         real_provider = HiggsfieldProvider(client=fake_client)
-        gate = GenerationApprovalGate(real_provider)
-        service = GenerationJobService(real_provider, gate)
-
         request = _request(
             real_generation_authorization=RealGenerationAuthorization(
                 request_id="005",
                 authorized_by_human=True,
             )
         )
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
+        service = GenerationJobService(real_provider, gate)
 
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
             service.execute(request)

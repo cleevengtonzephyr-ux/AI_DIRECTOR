@@ -23,6 +23,7 @@ from agents.generation_approval_gate import (
     GenerationApprovalDecision,
     GenerationApprovalGate,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST, fixture_video_005_identity_lock
 from tests.authorization_content_helpers import video_005_authorization
 from agents.task_manager import TaskManager, TaskStatus
 from director import AIDirector
@@ -213,7 +214,13 @@ class TestTaskManagerNeverSwallowsRealProtection(unittest.TestCase):
         }
 
         real_provider = HiggsfieldProvider(client=fake_client)
-        gate = GenerationApprovalGate(real_provider)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=fixture_video_005_identity_lock(duration=CONFIRMED_DURATION),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         report_service = FinalReportService(real_provider, gate)
 
         manager = TaskManager()

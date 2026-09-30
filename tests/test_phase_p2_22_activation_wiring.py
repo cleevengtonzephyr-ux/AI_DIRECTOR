@@ -46,6 +46,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import (
     GenerationJobActivationRejectedError,
@@ -509,7 +510,13 @@ class TestTUV_ProviderStillDisabled(P2_22_TestCase):
 
         real_provider = HiggsfieldProvider(client=fake_client)
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(real_provider, identity_lock=identity_lock)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            real_provider,
+            identity_lock=identity_lock,
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         activation_service = RequestScopedActivationService(gate, identity_lock)
         lock = FileCriticalSectionLock(self._tmp)
         job_service = GenerationJobService(
@@ -613,18 +620,24 @@ class TestX_WaitForJobOutsideLock(P2_22_TestCase):
         lock_dir = self._tmp
         observed = {"lock_present_during_poll": None}
 
-        class _LockCheckingProvider(MockHiggsfieldProvider):
-            def wait_for_job(self, job_id, timeout_seconds=600, interval_seconds=0):
-                observed["lock_present_during_poll"] = (
-                    lock_dir / "005.lock"
-                ).exists()
-                return super().wait_for_job(
-                    job_id, timeout_seconds=timeout_seconds, interval_seconds=interval_seconds
-                )
+        # Phase D : Mock RECONNU ; seul `wait_for_job` (hors frontière
+        # `create_job`) est instrumenté, sur l'instance.
+        provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=100.0)
 
-        provider = _LockCheckingProvider(cost_per_job=10.0, available_credits=100.0)
+        def _lock_checking_wait_for_job(job_id, timeout_seconds=600, interval_seconds=0):
+            observed["lock_present_during_poll"] = (
+                lock_dir / "005.lock"
+            ).exists()
+            return MockHiggsfieldProvider.wait_for_job(
+                provider, job_id, timeout_seconds=timeout_seconds, interval_seconds=interval_seconds
+            )
+
+        provider.wait_for_job = _lock_checking_wait_for_job
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(provider, identity_lock=identity_lock)
+        # Phase D : plafond de FIXTURE explicite (sans effet sur le Mock reconnu).
+        gate = GenerationApprovalGate(
+            provider, identity_lock=identity_lock, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST
+        )
         activation_service = RequestScopedActivationService(gate, identity_lock)
         lock = FileCriticalSectionLock(lock_dir)
         job_service = GenerationJobService(

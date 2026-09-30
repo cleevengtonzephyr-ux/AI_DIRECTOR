@@ -47,6 +47,7 @@ from agents.generation_approval_gate import (
     GenerationApprovalGate,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import fixture_ceiling_on_director_gate
 from tests.authorization_content_helpers import bind_request, video_005_authorization
 from agents.generation_job_service import GenerationJobService
 from agents.release_candidate_identity_lock import (
@@ -196,7 +197,10 @@ class TestRealDirectorWiringEndToEnd(P2_28_TestCase):
         director.higgsfield = _fake_client(cost=10.0, balance=100.0)
         authorization = video_005_authorization()
 
-        with isolated_director_state(self._tmp) as isolated_state:
+        # Phase D : plafond de FIXTURE explicite sur la Gate du Director
+        # (qui n'en configure aucun) ; sans lui, la chaîne réelle est
+        # BLOCKED avant create_job() (tests/test_phase_d_cost_fail_closed.py).
+        with isolated_director_state(self._tmp) as isolated_state, fixture_ceiling_on_director_gate():
             report = director.check_activation_readiness(self._real_request())
             # readiness: tout est vert SAUF le provider (chaîne réelle =
             # HiggsfieldProvider réel, structurellement désactivé).

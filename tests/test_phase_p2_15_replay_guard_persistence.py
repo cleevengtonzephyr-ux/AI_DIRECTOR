@@ -36,6 +36,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST, fixture_identity_lock_for
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobExecutionError, GenerationJobService
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
@@ -68,12 +69,12 @@ class _FilePersistenceTestCase(unittest.TestCase):
         self.addCleanup(self._tmpdir.cleanup)
         self.state_path = Path(self._tmpdir.name) / "state" / "executed_requests.json"
 
-    def _new_gate(self, provider=None) -> GenerationApprovalGate:
+    def _new_gate(self, provider=None, **gate_kwargs) -> GenerationApprovalGate:
         provider = provider or MockHiggsfieldProvider(
             cost_per_job=10.0, available_credits=100.0
         )
         store = FileExecutedRequestStore(self.state_path)
-        return GenerationApprovalGate(provider, executed_request_store=store)
+        return GenerationApprovalGate(provider, executed_request_store=store, **gate_kwargs)
 
 
 class TestA_FreshRequestNotYetExecuted(_FilePersistenceTestCase):
@@ -234,10 +235,15 @@ class TestI_RealProviderStillDisabled(_FilePersistenceTestCase):
         }
 
         real_provider = HiggsfieldProvider(client=fake_client)
-        gate = self._new_gate(provider=real_provider)
-        service = GenerationJobService(real_provider, gate)
-
         request = _request(real_generation_authorization=_valid_auth())
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = self._new_gate(
+            provider=real_provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
+        service = GenerationJobService(real_provider, gate)
 
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
             service.execute(request)

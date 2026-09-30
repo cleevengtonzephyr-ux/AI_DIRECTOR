@@ -52,6 +52,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import GenerationJobService
 from agents.release_candidate_identity_lock import (
@@ -535,21 +536,23 @@ class TestRevokedAndConsumedRemainServiceAuthoritative(_ValidContractCase):
 # ----------------------------------------------------------------------
 
 
-class _SpyProvider(MockHiggsfieldProvider):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.create_job_called = False
+def _SpyProvider(**kwargs):
+    """Mock RECONNU : chaque appel de create_job() est enregistré dans
+    `_jobs`. Phase D : un Provider qui redéfinit create_job() n'atteint
+    plus la frontière."""
 
-    def create_job(self, *args, **kwargs):
-        self.create_job_called = True
-        return super().create_job(*args, **kwargs)
+    return MockHiggsfieldProvider(**kwargs)
 
 
 class TestUpstreamLayersBlockBeforeProvider(_TmpDirTestCase):
     def _spy_stack(self, **kwargs):
         provider = _SpyProvider(**kwargs)
         identity_lock = ReleaseCandidateIdentityLock(C)
-        gate = GenerationApprovalGate(provider, identity_lock=identity_lock)
+        # Phase D : plafond de FIXTURE explicite (sans effet sur le Mock
+        # reconnu) ; l'Identity Lock C est déjà configuré.
+        gate = GenerationApprovalGate(
+            provider, identity_lock=identity_lock, max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST
+        )
         activation_service = RequestScopedActivationService(gate, identity_lock)
         provider_activation_service = ControlledRealProviderActivationService(
             gate, identity_lock, activation_service
@@ -572,7 +575,7 @@ class TestUpstreamLayersBlockBeforeProvider(_TmpDirTestCase):
 
         with self.assertRaises(ActivationRejectedError):
             activation_service.prepare_activation(request)
-        self.assertFalse(provider.create_job_called)
+        self.assertEqual(provider._jobs, {})  # create_job() never called
 
     def test_T_already_executed_never_reaches_provider_on_replay(self):
         provider, gate, activation_service, pa_service, job_service = self._spy_stack()
@@ -587,9 +590,9 @@ class TestUpstreamLayersBlockBeforeProvider(_TmpDirTestCase):
             provider_activation_contract=pa_contract,
         )
         self.assertTrue(outcome.succeeded)
-        self.assertTrue(provider.create_job_called)
+        self.assertEqual(len(provider._jobs), 1)  # create_job() called
 
-        provider.create_job_called = False  # reset for the replay attempt
+        jobs_before_replay = len(provider._jobs)  # reset for the replay attempt
 
         new_auth_request = _conforming_request(
             real_generation_authorization=RealGenerationAuthorization(
@@ -600,7 +603,7 @@ class TestUpstreamLayersBlockBeforeProvider(_TmpDirTestCase):
 
         with self.assertRaises(ActivationRejectedError):
             activation_service.prepare_activation(new_auth_request)
-        self.assertFalse(provider.create_job_called)
+        self.assertEqual(len(provider._jobs), jobs_before_replay)  # never called again
 
 
 # ----------------------------------------------------------------------

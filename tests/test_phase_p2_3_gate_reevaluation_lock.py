@@ -41,12 +41,14 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import fixture_real_path_gate_kwargs
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import (
     GenerationJobExecutionError,
     GenerationJobService,
 )
 from agents.production_model import PRODUCTION_MODEL
+from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
 from integrations.higgsfield.provider import BaseHiggsfieldProvider
 from integrations.higgsfield.types import CostEstimate, Job, JobStatus, ModelParam, ModelSchema, VideoResult
 
@@ -105,6 +107,25 @@ class _ConditionsDegradeBetweenCallsProvider(BaseHiggsfieldProvider):
         raise AssertionError("wait_for_job ne doit jamais être appelé dans ces tests.")
 
 
+def _degrading_mock(**kwargs):
+    """Phase D : Mock RECONNU dont le solde est suffisant au premier appel
+    (1000) puis tombe à 0 -- même scénario que
+    `_ConditionsDegradeBetweenCallsProvider`, qu'un `create_job()`
+    redéfini empêcherait désormais d'atteindre la frontière d'exécution.
+    Seul `get_account_balance` (hors frontière `create_job`) est remplacé
+    sur l'instance ; chaque `create_job()` est enregistré dans `_jobs`."""
+
+    provider = MockHiggsfieldProvider(cost_per_job=10.0, available_credits=1000.0, **kwargs)
+    balance_calls = {"count": 0}
+
+    def _degrading_balance():
+        balance_calls["count"] += 1
+        return 1000.0 if balance_calls["count"] == 1 else 0.0
+
+    provider.get_account_balance = _degrading_balance
+    return provider
+
+
 def _request(approved: bool) -> GenerationRequest:
     """
     Phase P2.11 : inclut une autorisation humaine valide liée à
@@ -140,7 +161,9 @@ class TestGenerationJobServiceReevaluatesAtExecutionTime(unittest.TestCase):
         # Étape 1 : un premier evaluate() isolé obtient APPROVED (budget
         # encore suffisant à cet instant).
         provider = _ConditionsDegradeBetweenCallsProvider()
-        gate = GenerationApprovalGate(provider)
+        # Phase D : Provider instrumenté (non reconnu comme mock) -> fixtures
+        # EXPLICITES : plafond + Identity Lock lié au contenu exact.
+        gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(_request(approved=True)))
 
         first_decision = gate.evaluate(_request(approved=True))
         self.assertEqual(first_decision.decision, GenerationApprovalDecision.APPROVED)
@@ -149,8 +172,9 @@ class TestGenerationJobServiceReevaluatesAtExecutionTime(unittest.TestCase):
         # Étape 2 : les conditions changent (solde chute) avant toute
         # tentative d'exécution. GenerationJobService.execute() ne doit
         # PAS se fier à la première décision APPROVED : il réévalue.
-        provider = _ConditionsDegradeBetweenCallsProvider()
-        gate = GenerationApprovalGate(provider)
+        provider = _degrading_mock()
+        # Phase D : fixtures EXPLICITES conservées (sans effet sur le Mock reconnu).
+        gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(_request(approved=True)))
         job_service = GenerationJobService(provider, gate)
 
         # Simule le premier evaluate() "obtenu plus tôt" (étape 1).
@@ -167,14 +191,17 @@ class TestGenerationJobServiceReevaluatesAtExecutionTime(unittest.TestCase):
         self.assertEqual(
             ctx.exception.approval.decision, GenerationApprovalDecision.BLOCKED
         )
-        self.assertEqual(provider.create_job_call_count, 0)
+        self.assertEqual(len(provider._jobs), 0)
 
     def test_the_stale_approved_result_is_never_reused_by_execute(self):
         # Démontre explicitement que GenerationJobService ne prend PAS
         # en paramètre une décision précalculée : il appelle
         # gate.evaluate(request) lui-même, à chaque execute().
-        provider = _ConditionsDegradeBetweenCallsProvider()
-        gate = GenerationApprovalGate(provider)
+        provider = _degrading_mock()
+        # Phase D : Provider non reconnu comme mock -> fixtures EXPLICITES
+        # (plafond + Identity Lock) pour que la Gate refuse pour la raison
+        # testée, et non faute de configuration du chemin réel.
+        gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(_request(approved=True)))
         job_service = GenerationJobService(provider, gate)
 
         import inspect
@@ -190,10 +217,15 @@ class TestGenerationJobServiceReevaluatesAtExecutionTime(unittest.TestCase):
         # Consomme le 1er appel evaluate() (solde encore suffisant),
         # simulant une décision "obtenue plus tôt" ailleurs dans le code
         # — execute() ne doit PAS pouvoir la réutiliser.
-        gate.evaluate(_request(approved=True))
+        self.assertEqual(gate.evaluate(_request(approved=True)).decision, GenerationApprovalDecision.APPROVED)
 
-        with self.assertRaises(GenerationJobExecutionError):
+        with self.assertRaises(GenerationJobExecutionError) as ctx:
             job_service.execute(_request(approved=True))
+        self.assertEqual(len(provider._jobs), 0)
+        self.assertTrue(
+            any("Insufficient credits" in r for r in ctx.exception.approval.reasons),
+            ctx.exception.approval.reasons,
+        )
 
     def test_two_consecutive_execute_calls_each_trigger_their_own_evaluation(self):
         # Un provider dont le solde ne se dégrade qu'une fois : le 1er
@@ -203,24 +235,23 @@ class TestGenerationJobServiceReevaluatesAtExecutionTime(unittest.TestCase):
         # dégradé, prouvant que chaque execute() déclenche BIEN sa
         # propre évaluation indépendante plutôt que de réutiliser un
         # résultat mis en cache.
-        class _SucceedsOnceThenDegrades(_ConditionsDegradeBetweenCallsProvider):
-            def create_job(self, job_type, prompt, **params):
-                self.create_job_call_count += 1
-                return Job(job_id="job-1", job_type=job_type, status=JobStatus.QUEUED)
-
-            def get_job(self, job_id):
-                return Job(job_id=job_id, job_type=PRODUCTION_MODEL, status=JobStatus.SUCCEEDED)
-
-            def wait_for_job(self, job_id, timeout_seconds=600, interval_seconds=3):
-                return VideoResult(job_id=job_id, status=JobStatus.SUCCEEDED, output_urls=("mock://x",))
-
-        provider = _SucceedsOnceThenDegrades()
-        gate = GenerationApprovalGate(provider)
+        # Phase D : Mock reconnu -- le job réussit (polling simulé, sans
+        # attente réelle) puis le solde se dégrade.
+        provider = _degrading_mock(succeed_after_polls=1, sleep=lambda seconds: None)
+        # Phase D : fixtures EXPLICITES conservées (sans effet sur le Mock reconnu).
+        # (deux contenus : "005" puis sa copie "006" évaluée plus bas)
+        gate = GenerationApprovalGate(
+            provider,
+            **fixture_real_path_gate_kwargs(
+                _request(approved=True),
+                dataclasses.replace(_request(approved=True), request_id="006"),
+            ),
+        )
         job_service = GenerationJobService(provider, gate)
 
         # 1er execute() : premier appel evaluate() -> solde suffisant -> APPROVED -> job créé.
         outcome = job_service.execute(_request(approved=True))
-        self.assertEqual(provider.create_job_call_count, 1)
+        self.assertEqual(len(provider._jobs), 1)
 
         # 2e execute() avec une NOUVELLE requête (sinon ALREADY_EXECUTED
         # masquerait le vrai signal recherché ici) : solde désormais
@@ -233,7 +264,7 @@ class TestGenerationJobServiceReevaluatesAtExecutionTime(unittest.TestCase):
         self.assertEqual(
             ctx.exception.approval.decision, GenerationApprovalDecision.BLOCKED
         )
-        self.assertEqual(provider.create_job_call_count, 1)  # Toujours 1, pas 2.
+        self.assertEqual(len(provider._jobs), 1)  # Toujours 1, pas 2.
 
 
 if __name__ == "__main__":

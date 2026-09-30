@@ -41,6 +41,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import GenerationJobService
 from agents.release_candidate_identity_lock import (
@@ -98,7 +99,8 @@ def _valid_auth(request_id=None) -> RealGenerationAuthorization:
 
 
 class _WiredStack:
-    def __init__(self, tmp_dir: Path, cost_per_job=10.0, available_credits=100.0):
+    def __init__(self, tmp_dir: Path, cost_per_job=10.0, available_credits=100.0,
+                 max_cost_credits_per_request=None):
         self.provider = MockHiggsfieldProvider(
             cost_per_job=cost_per_job, available_credits=available_credits
         )
@@ -109,6 +111,7 @@ class _WiredStack:
             self.provider,
             executed_request_store=FileExecutedRequestStore(tmp_dir / "state" / "executed_requests.json"),
             identity_lock=self.identity_lock,
+            max_cost_credits_per_request=max_cost_credits_per_request,
         )
         self.activation_service = RequestScopedActivationService(
             self.gate, self.identity_lock
@@ -387,6 +390,8 @@ class TestO_ProviderReadiness(P2_24_TestCase):
             real_provider,
             executed_request_store=FileExecutedRequestStore(self._tmp / "state" / "executed_requests.json"),
             identity_lock=identity_lock,
+            # Phase D : plafond de FIXTURE explicite (chemin réel).
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
         )
         activation_service = RequestScopedActivationService(gate, identity_lock)
         lock = FileCriticalSectionLock(self._tmp)
@@ -426,17 +431,17 @@ class TestO_ProviderReadiness(P2_24_TestCase):
 
 class TestPQR_ReadinessNeverActs(P2_24_TestCase):
     def test_fully_mock_ready_evaluation_never_calls_create_job(self):
+        # Phase D : remplacer `create_job` sur l'instance rendrait le Provider
+        # non reconnu (donc jamais « prêt ») ; le Mock reconnu enregistre
+        # chaque appel de `create_job()` dans `_jobs` -- observation
+        # équivalente, qui voit aussi tout appel direct.
         stack = self._stack()
         request = _conforming_request()
         contract = stack.activation_service.prepare_activation(request)
 
-        stack.provider.create_job = MagicMock(
-            wraps=stack.provider.create_job
-        )
-
         report = stack.evaluator.evaluate(request, activation_contract=contract)
         self.assertEqual(report.decision, "READY")  # Mock provider -> provider_ready True
-        stack.provider.create_job.assert_not_called()
+        self.assertEqual(stack.provider._jobs, {})
 
     def test_readiness_never_touches_a_real_higgsfield_client(self):
         fake_client = MagicMock()

@@ -262,7 +262,7 @@ class TestForeignMissionCertificateGrantsNothing(unittest.TestCase):
         # the request P2 blocks stays blocked, whatever the certificate says.
         with self.assertRaises(GenerationJobExecutionError):
             job_service.execute(request_for_mission_b)
-        self.assertEqual(created, [])
+        self.assertEqual(created, {})  # Phase D : registre `_jobs` du Mock reconnu (cf. P3.71 `_chain`)
         self.assertNotIn("certificate", inspect.signature(job_service.execute).parameters)
 
 

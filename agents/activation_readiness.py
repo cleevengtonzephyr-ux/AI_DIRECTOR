@@ -88,6 +88,8 @@ from agents.generation_approval_gate import (
     GenerationApprovalGate,
     GenerationRequest,
     RealGenerationAuthorization,
+    is_exact_disabled_real_provider,
+    is_recognized_test_mock_provider,
 )
 from agents.generation_cost_service import CostEstimationStatus
 from agents.generation_job_service import GenerationJobService
@@ -505,6 +507,19 @@ class ActivationReadinessEvaluator:
 
     def _check_provider(self):
         provider = self.gate.provider
+
+        # Phase D : sous-classe du vrai Provider, wrapper ou Provider
+        # inconnu -- jamais « prêt », comme à la frontière d'exécution.
+        # Vérifié EN PREMIER : ne lève jamais, quel que soit l'objet.
+        if not (
+            is_recognized_test_mock_provider(provider)
+            or is_exact_disabled_real_provider(provider)
+        ):
+            return False, [
+                f"provider {type(provider).__name__} is neither the real "
+                f"HiggsfieldProvider nor a recognized test mock -- a "
+                f"subclass, wrapper or unknown provider is never ready."
+            ]
 
         is_the_disabled_real_provider = (
             type(provider).create_job is HiggsfieldProvider.create_job

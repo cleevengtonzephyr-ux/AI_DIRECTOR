@@ -50,6 +50,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST, fixture_identity_lock_for
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobService
 
@@ -260,8 +261,14 @@ class TestAuthorizedP2PathUnderTheLock(_LockedClientCase):
 
     def test_authorized_request_reads_through_the_real_client_and_creation_stays_closed(self):
         provider = HiggsfieldProvider(client=HiggsfieldClient())
-        gate = GenerationApprovalGate(provider)
         request = self._authorized_request()
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
 
         self.assertEqual(gate.evaluate(request).decision, GenerationApprovalDecision.APPROVED)
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
@@ -274,9 +281,15 @@ class TestAuthorizedP2PathUnderTheLock(_LockedClientCase):
 
     def test_unauthorized_request_never_reaches_creation(self):
         provider = HiggsfieldProvider(client=HiggsfieldClient())
-        gate = GenerationApprovalGate(provider)
-        request = GenerationRequest(request_id="p383-no-auth", job_type="seedance_2_0", prompt="P", duration=15,
+        request = GenerationRequest(**content_media(), request_id="p383-no-auth", job_type="seedance_2_0", prompt="P", duration=15,
                                     resolution="720p", aspect_ratio="9:16", approved=True)
+        # Phase D : fixtures de TEST explicites (plafond + Identity Lock) ;
+        # sans elles, la Gate bloque le chemin réel avant create_job().
+        gate = GenerationApprovalGate(
+            provider,
+            identity_lock=fixture_identity_lock_for(request),
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+        )
         self.assertEqual(gate.evaluate(request).decision, GenerationApprovalDecision.NEEDS_APPROVAL)
         self.assertNotIn(("generate", "create"), {c[:2] for c in self.fake.calls})
 

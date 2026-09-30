@@ -55,6 +55,7 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
+from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST
 from tests.authorization_content_helpers import bind_request
 from agents.generation_job_service import (
     GenerationJobActivationRejectedError,
@@ -586,6 +587,8 @@ class TestV_ProviderDisabledWithFullStackValid(P2_25_TestCase):
             real_provider,
             executed_request_store=FileExecutedRequestStore(self._tmp / "state" / "executed_requests.json"),
             identity_lock=identity_lock,
+            # Phase D : plafond de FIXTURE explicite (chemin réel).
+            max_cost_credits_per_request=FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
         )
         activation_service = RequestScopedActivationService(gate, identity_lock)
         lock = FileCriticalSectionLock(self._tmp)

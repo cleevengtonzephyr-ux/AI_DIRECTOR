@@ -27,6 +27,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.authorization_content_helpers import content_media
+from tests.real_provider_path_fixtures import fixture_real_path_gate_kwargs
 from agents.generation_approval_gate import GenerationApprovalGate, GenerationRequest
 from agents.generation_cost_service import GenerationCostService
 from agents.production_model import PRODUCTION_MODEL
@@ -69,6 +71,8 @@ class _RecordingProvider(BaseHiggsfieldProvider):
                 ModelParam(name="duration", type="integer", required=False, default=5),
                 ModelParam(name="resolution", type="string", required=False, default="720p"),
                 ModelParam(name="aspect_ratio", type="string", required=False, default="16:9"),
+                ModelParam(name="start_image", type="object|null", required=False),
+                ModelParam(name="image_references", type="array", required=False),
             ),
         )
 
@@ -177,9 +181,8 @@ class TestApprovalGateEndToEndParameterFidelity(unittest.TestCase):
 
     def test_full_request_parameters_reach_the_provider_unmodified(self):
         provider = _RecordingProvider()
-        gate = GenerationApprovalGate(provider)
-
         request = GenerationRequest(
+            **content_media(),
             request_id="005",
             job_type=PRODUCTION_MODEL,
             prompt=REAL_MULTILINE_MASTER_PROMPT_005_LIKE,
@@ -188,6 +191,9 @@ class TestApprovalGateEndToEndParameterFidelity(unittest.TestCase):
             aspect_ratio="9:16",
             approved=False,
         )
+        # Phase D : Provider instrumenté (non reconnu comme mock) -> fixtures
+        # EXPLICITES : plafond + Identity Lock lié au contenu exact.
+        gate = GenerationApprovalGate(provider, **fixture_real_path_gate_kwargs(request))
 
         gate.evaluate(request)
 
