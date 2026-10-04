@@ -1,0 +1,105 @@
+# AI DIRECTOR — Higgsfield production run (Phase F). Provider = CLOSED.
+#
+# Ce workflow ne peut aujourd'hui RIEN soumettre : le job « execute »
+# recalcule le manifeste, le compare à l'empreinte approuvée, puis s'arrête
+# sur Provider = CLOSED (code 4, échec visible). Voir
+# docs/phase_f_production_path_design.md.
+#
+# Prérequis du propriétaire, AVANT toute décision de lancement (aucun n'est
+# fait par ce dépôt) :
+#   1. créer l'environnement `higgsfield-production` avec relecteurs requis,
+#      auto-approbation interdite et branche de déploiement limitée à `main` ;
+#      sinon GitHub le crée sans protection à la première exécution ;
+#   2. y placer les secrets HIGGSFIELD_API_KEY_ID / HIGGSFIELD_API_KEY_SECRET
+#      comme secrets D'ENVIRONNEMENT, jamais comme secrets de dépôt.
+# Sans ces secrets, rien ne peut s'authentifier ; le script actuel ne les
+# lit d'ailleurs pas.
+#
+# Limites (non résolues) : l'approbation de l'environnement porte sur le
+# déploiement, PAS cryptographiquement sur `approved_manifest_sha256`, saisi
+# par la personne qui lance le workflow ; `approval_id` (gh-<run_id>) n'est
+# ni vérifié ni lié à une autorisation humaine. Le journal écrit dans
+# RUNNER_TEMP disparaît avec le runner : aucun anti-rejeu entre exécutions.
+
+name: Higgsfield production (CLOSED)
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_manifest_sha256:
+        description: "manifest_sha256 publié par le job prepare et approuvé"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: higgsfield-production
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    outputs:
+      manifest_sha256: ${{ steps.manifest.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.5"
+
+      - name: Phase F tests (mock only, no network)
+        run: python -m unittest tests.test_phase_f_production_path -v
+
+      - name: Compute manifest (no network, no secret)
+        id: manifest
+        shell: pwsh
+        env:
+          APPROVED_MANIFEST_SHA256: ${{ inputs.approved_manifest_sha256 }}
+        run: |
+          $output = python scripts/higgsfield_production_run.py prepare --summary-file "$env:GITHUB_STEP_SUMMARY"
+          if ($LASTEXITCODE -ne 0) { $output; exit $LASTEXITCODE }
+          $line = $output | Where-Object { $_ -match '^manifest_sha256=[0-9a-f]{64}$' } | Select-Object -First 1
+          if (-not $line) { Write-Output "manifest digest not found"; exit 2 }
+          $digest = $line.Substring('manifest_sha256='.Length)
+          "manifest_sha256=$digest" >> $env:GITHUB_OUTPUT
+          if ($digest -cne $env:APPROVED_MANIFEST_SHA256) {
+            Write-Output "MANIFEST_MISMATCH: computed $digest differs from the requested manifest"
+            exit 3
+          }
+
+  execute:
+    needs: prepare
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    environment: higgsfield-production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.5"
+
+      - name: Verify approved manifest, then stop on Provider = CLOSED
+        shell: pwsh
+        env:
+          APPROVED_MANIFEST_SHA256: ${{ inputs.approved_manifest_sha256 }}
+          APPROVAL_ID: gh-${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python scripts/higgsfield_production_run.py verify-and-execute `
+            --approved-manifest-sha256 "$env:APPROVED_MANIFEST_SHA256" `
+            --approval-id "$env:APPROVAL_ID" `
+            --run-attempt "$env:RUN_ATTEMPT" `
+            --journal "$env:RUNNER_TEMP/production_audit.jsonl" `
+            --new-journal
+          exit $LASTEXITCODE
