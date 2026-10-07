@@ -2,7 +2,7 @@
 
 - **Date :** 2026-10-07
 - **Référence :** `main` à `f687973568d787e2b2e0051a4632cbbe962de94b` (fusion de la PR #6, Phase F)
-- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. Il n'implémente rien, n'autorise rien, ne déploie rien et ne choisit aucune option à la place du propriétaire. Les éléments décrits comme « proposition » restent soumis aux décisions de la section 10.
+- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. La décision D-1 ci-dessous a été prise explicitement par le propriétaire le 2026-10-07 ; les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
 
 **NO-GO en vigueur. Provider = CLOSED.** La décision de [`phase_a_real_generation_decision.md`](phase_a_real_generation_decision.md) est inchangée. Ce document prolonge la conception de l'identité ([`phase_c_authorizer_identity_design.md`](phase_c_authorizer_identity_design.md)), celle des limites de l'autorisation, du plafond, de la révocation et de l'arrêt ([`phase_e_authorization_limits_ceiling_revocation_shutdown_design.md`](phase_e_authorization_limits_ceiling_revocation_shutdown_design.md)) et le chemin de production fermé ([`phase_f_production_path_design.md`](phase_f_production_path_design.md)). Il ne résout aucune des sept conditions de la Phase A. Aucun des quatre verrous d'exécution ni des verrous F-1 à F-4 n'est modifié.
 
@@ -10,9 +10,9 @@ Pendant cette phase : aucun code, workflow, test, verrou, paramètre serveur, r�
 
 ## 1. Rôle prévu du serveur
 
-### 1.1 Rôle proposé
+### 1.1 Architecture retenue pour la conception (D-1)
 
-Proposition, sous réserve de la décision D-1. Le serveur hébergerait un **service d'approbation humaine**, joignable sous `zephyr-approval.fr`, qui :
+Le choix de conception est l'option **E-2, courtier** : le serveur Scaleway à Paris hébergerait un **service d'approbation humaine**, joignable sous `zephyr-approval.fr`. Si une clé API dédiée à ce chemin est créée ultérieurement, le serveur en serait le seul détenteur ; il conserverait aussi l'état durable anti-rejeu sur son volume persistant. Cette décision ne prétend pas contrôler les autres accès au compte Higgsfield (section 4.10). Le service :
 
 1. reçoit d'un run GitHub Actions une **demande d'approbation** authentifiée par un jeton OIDC GitHub, portant l'empreinte du manifeste calculé par le job `prepare` (Phase F) ;
 2. présente à un humain l'**énoncé canonique** de cette demande (dépôt, commit, workflow, run, manifeste, paramètres, plafond) ;
@@ -37,7 +37,7 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Vérifié dans le dépôt** | Le workflow de Phase F s'exécute sur `windows-2025`, sans `id-token: write` et sans référence à un secret | `.github/workflows/higgsfield-production.yml` |
 | **Déclaré par le propriétaire, non vérifié par cette phase** | CI de la PR #6 verte : tests unitaires et audit `NO_DRIFT` | Instruction du propriétaire |
 | **Déclaré par le propriétaire, non vérifié par cette phase** | Configuration actuelle du serveur | Section 6 |
-| **Ouvert** | Rôle exact du serveur et détenteur de l'identifiant Higgsfield : simple approbateur ou courtier | Section 4.10, décision D-1 |
+| **Décision prise par le propriétaire** | D-1 : option E-2 (courtier) ; toute clé API dédiée à ce chemin serait détenue uniquement par le serveur, qui conserve l'état durable anti-rejeu sur son volume persistant. Choix de conception seulement : rien n'est implémenté et aucune clé n'a été créée | Instruction explicite du propriétaire, 2026-10-07 |
 | **Ouvert** | Moteur de stockage, sauvegardes, rétention, ancre externe | Section 3, décisions D-6 et D-7 |
 | **Ouvert** | Facteur d'authentification, récupération, politique des passkeys | Sections 4.4 et 5, décisions D-2 à D-4 |
 | **Ouvert** | Forme de la réponse du service et sa vérification par le Director | Section 4.11, décision D-18 |
@@ -50,7 +50,7 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 
 | Constat | Conséquence pour G |
 |---|---|
-| La Phase F constate que les runners GitHub sont éphémères et que son journal, écrit dans `RUNNER_TEMP`, disparaît : aucun anti-rejeu entre exécutions | Le serveur, avec son volume persistant, est l'emplacement **envisagé** pour l'état durable. Ce choix reste à confirmer (D-1) |
+| La Phase F constate que les runners GitHub sont éphémères et que son journal, écrit dans `RUNNER_TEMP`, disparaît : aucun anti-rejeu entre exécutions | Selon D-1, le serveur et son volume persistant sont l'emplacement retenu en conception pour l'état durable. La base et les mécanismes restent à choisir (D-6 et D-7) |
 | `approval_id` vaut `gh-<run_id>` et n'est vérifié par rien (Phase F §5) | L'identifiant d'approbation doit être choisi par le service, jamais par le run (exigence L5 de la Phase C) |
 | L'approbation d'un environnement GitHub porte sur un déploiement, pas sur l'empreinte du manifeste (Phase F §5) | L'assertion WebAuthn doit porter cryptographiquement sur l'énoncé qui contient `manifest_sha256` |
 | Le dépôt n'utilise que la bibliothèque standard | Elle ne fournit aucune API de vérification de signature RS256 (jeton OIDC) ou ECDSA/Ed25519 (WebAuthn). Il faudrait une dépendance tierce : c'est une décision du propriétaire (D-13). Une implémentation cryptographique maison est écartée |
@@ -286,16 +286,16 @@ Proposition, sous réserve de D-9.
 
 ### 4.10 Point d'application : qui détient l'identifiant du fournisseur
 
-C'est la question décisive de cette architecture, et elle reste ouverte (D-1).
+C'est la décision D-1, prise le 2026-10-07 : **E-2 est retenue pour la conception**. Ce choix n'implémente pas le courtier et ne constitue pas une décision d'ouverture du Provider.
 
 | Option | Description | Ce que l'approbation garantit réellement | Compromis |
 |---|---|---|---|
 | **E-1. Le run détient l'identifiant** (secret d'environnement GitHub) | Le service délivre l'autorisation ; le run la vérifie (section 4.11) puis appelle le fournisseur | Le code du commit autorisé refuse d'agir sans approbation. Un code modifié qui détient le secret peut s'en passer, comme toute étape du job qui y a accès | Le service n'a aucun secret fournisseur. La garantie repose sur la protection de `main`, de l'environnement et des actions épinglées |
-| **E-2. Le service est le seul détenteur de cet identifiant** (courtier) | Le run ne reçoit jamais l'identifiant ; seul le service soumet, après consommation | Aucune soumission **par ce chemin** sans approbation consommée, même avec un run compromis, **sous l'hypothèse d'un serveur intègre** | Secret fournisseur sur un serveur exposé à Internet ; surface plus grande ; le service doit implémenter les verrous et la classification de la Phase F |
+| **E-2. RETENUE : le service est le seul détenteur de cet identifiant** (courtier) | Le run ne reçoit jamais l'identifiant ; seul le service soumet, après consommation | Aucune soumission **par ce chemin** sans approbation consommée, même avec un run compromis, **sous l'hypothèse d'un serveur intègre** | Secret fournisseur sur un serveur exposé à Internet ; surface plus grande ; le service doit implémenter les verrous et la classification de la Phase F |
 
 **Accès fournisseur indépendants, hors de portée des deux options :** l'interface web du compte Higgsfield, le CLI Higgsfield authentifié sur un poste (Phase A, verrous 3 et 4), toute autre clé d'API, et tout connecteur ou intégration tierce autorisé sur ce compte. Ni E-1 ni E-2 ne les contrôle. Leur inventaire, leur protection et leur révocation relèvent de D-15.
 
-Aucune des deux options n'est mise en œuvre. Dans les deux cas, l'ouverture effective du Provider exige une nouvelle décision écrite distincte de la Phase A.
+L'option E-2 est un choix d'architecture seulement : elle n'est pas mise en œuvre et aucun identifiant fournisseur n'a été créé ou placé sur le serveur. L'ouverture effective du Provider exige toujours une nouvelle décision écrite distincte de la Phase A. Les accès fournisseur indépendants listés ci-dessus restent hors de portée.
 
 ### 4.11 Réponse du service et vérification par le Director
 
@@ -465,7 +465,7 @@ Règles communes :
 
 | # | Décision | Options principales |
 |---|---|---|
-| D-1 | Point d'application et rôle du serveur | E-1 (le run détient l'identifiant) ou E-2 (courtier) ; état durable sur le serveur ou ailleurs |
+| D-1 | **Décidée le 2026-10-07 — courtier E-2** | Toute clé API dédiée à ce chemin serait détenue uniquement par le service ; état anti-rejeu durable sur le serveur. Autres accès au compte hors périmètre. Choix de conception seulement, sans implémentation ni ouverture du Provider |
 | D-2 | Facteur d'authentification | Clé de sécurité matérielle liée à l'appareil, passkey de plateforme, ou les deux ; exigence de vérification de l'utilisateur ; racine de confiance de l'inscription (clé SSH d'administration ou autre) |
 | D-3 | Récupération | Nombre minimal d'identifiants enregistrés ; procédure de perte ou de vol ; qui peut inscrire un remplaçant, et comment |
 | D-4 | Passkeys synchronisées | Autorisées, interdites (attestation vérifiable exigée, section 4.4), ou autorisées sous conditions (drapeaux BE/BS) |
@@ -489,7 +489,7 @@ Règles communes :
 Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 
 1. **Revue de ce document G1** par le propriétaire, puis fusion éventuelle par PR.
-2. **Décisions écrites** D-1 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite.
+2. **Décisions écrites** D-2 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 est déjà décidée pour la conception ; elle ne constitue pas une autorisation d'implémenter ou d'ouvrir le Provider.
 3. **Vérifications documentaires** : offres, tarifs TTC et fonctions de console de Scaleway ; plan GitHub ; versions des paquets Ubuntu.
    - L'essai avec un **jeton OIDC réel** exige une **autorisation explicite et distincte du propriétaire**.
    - Il passerait par un workflow dédié qui n'affiche jamais le jeton brut, seulement des claims décodés non sensibles, et n'appelle aucun service.
