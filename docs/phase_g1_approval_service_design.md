@@ -2,7 +2,7 @@
 
 - **Date :** 2026-10-07
 - **Référence :** `main` à `f687973568d787e2b2e0051a4632cbbe962de94b` (fusion de la PR #6, Phase F)
-- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. La décision D-1 ci-dessous a été prise explicitement par le propriétaire le 2026-10-07 ; les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
+- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 est choisie sous la délégation explicite du propriétaire du 2026-10-07. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
 
 **NO-GO en vigueur. Provider = CLOSED.** La décision de [`phase_a_real_generation_decision.md`](phase_a_real_generation_decision.md) est inchangée. Ce document prolonge la conception de l'identité ([`phase_c_authorizer_identity_design.md`](phase_c_authorizer_identity_design.md)), celle des limites de l'autorisation, du plafond, de la révocation et de l'arrêt ([`phase_e_authorization_limits_ceiling_revocation_shutdown_design.md`](phase_e_authorization_limits_ceiling_revocation_shutdown_design.md)) et le chemin de production fermé ([`phase_f_production_path_design.md`](phase_f_production_path_design.md)). Il ne résout aucune des sept conditions de la Phase A. Aucun des quatre verrous d'exécution ni des verrous F-1 à F-4 n'est modifié.
 
@@ -39,7 +39,9 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Déclaré par le propriétaire, non vérifié par cette phase** | Configuration actuelle du serveur | Section 6 |
 | **Décision prise par le propriétaire** | D-1 : option E-2 (courtier) ; toute clé API dédiée à ce chemin serait détenue uniquement par le serveur, qui conserve l'état durable anti-rejeu sur son volume persistant. Choix de conception seulement : rien n'est implémenté et aucune clé n'a été créée | Instruction explicite du propriétaire, 2026-10-07 |
 | **Ouvert** | Moteur de stockage, sauvegardes, rétention, ancre externe | Section 3, décisions D-6 et D-7 |
-| **Ouvert** | Facteur d'authentification, récupération, politique des passkeys | Sections 4.4 et 5, décisions D-2 à D-4 |
+| **Décision prise sous délégation explicite du propriétaire** | D-2 : WebAuthn est le seul facteur normal d'approbation ; la vérification locale de l'utilisateur est obligatoire ; l'inscription est réservée à une invitation à usage unique créée par SSH d'administration | Section 4.4, décision D-2 |
+| **Ouvert** | Récupération et nombre d'identifiants | Décision D-3 |
+| **Ouvert** | Types d'authentificateurs acceptés et politique des passkeys synchronisées | Section 4.4, décision D-4 |
 | **Ouvert** | Forme de la réponse du service et sa vérification par le Director | Section 4.11, décision D-18 |
 | **Ouvert** | Réapprobation d'un même manifeste | Section 4.6, décision D-17 |
 | **Ouvert** | Exposition web : ports, TLS, reverse proxy | Section 7, décision D-12 |
@@ -205,18 +207,19 @@ Le service ne peut pas recalculer lui-même le manifeste sans disposer des fichi
 ### 4.4 Approbation humaine : WebAuthn
 
 - **Relying Party** : identifiant `zephyr-approval.fr`, origine `https://zephyr-approval.fr`. WebAuthn exige un contexte sécurisé : HTTPS obligatoire en production (`localhost` est toléré pour les essais locaux).
-- **Inscription** : proposition, sous réserve de D-2. Fermée par défaut, elle ne serait possible que par un jeton d'inscription à usage unique et à courte durée, créé localement par l'administrateur via SSH. La clé SSH d'administration deviendrait alors la racine de confiance de l'inscription.
+- **Inscription (D-2 décidée)** : fermée par défaut ; elle n'est possible qu'au moyen d'une invitation d'inscription à usage unique et de courte durée, créée par l'administrateur depuis une session SSH. Cette invitation est la racine de confiance de l'inscription ; le premier drapeau UV d'un nouvel identifiant n'est pas traité comme une preuve d'identité ni comme le facteur qui autorise sa propre inscription. La vérification locale de l'utilisateur est demandée pendant l'inscription et vérifiée lorsqu'elle est signalée.
 - **Défi** : `SHA-256` d'une chaîne de séparation de domaine, de l'énoncé canonique (section 4.5) et du nonce choisi par le service. Le défi est à usage unique et expire avec la demande (`approval_deadline`).
 - **Vérifications** :
   - signature avec la clé publique enregistrée ;
   - égalité exacte du défi ;
   - `rpIdHash`, origine, `type` = `webauthn.get`, `crossOrigin` absent ou faux ;
   - drapeau de présence (UP) ;
-  - drapeau de vérification de l'utilisateur (UV), exigé ;
+  - drapeau de vérification de l'utilisateur (UV), exigé pour chaque approbation ; si le client ou l'authentificateur ne peut pas effectuer cette vérification, la cérémonie échoue ;
   - identifiant de l'authentificateur (credential ID) connu et non révoqué ;
   - politique du compteur de signatures (souvent nul pour les passkeys synchronisées, donc inutilisable pour détecter un clonage) ;
   - drapeaux de sauvegarde (BE, BS) selon la politique D-4.
 - **Passkeys synchronisées** : les drapeaux BE et BS sont **déclarés par l'authentificateur**. L'attestation est en général absente pour les passkeys synchronisées. Une interdiction fiable des passkeys synchronisées supposerait donc d'exiger une attestation vérifiable (AAGUID et métadonnées de l'authentificateur), ce qui restreint les authentificateurs utilisables. Les comportements exacts sont à vérifier avec la bibliothèque retenue (D-13).
+- **Portée de la vérification locale** : UV signifie que l'authentificateur a effectué une vérification locale, par exemple PIN, mot de passe de l'appareil ou biométrie. Cela ne donne pas au service une identité civile ; l'identité de l'approbateur et la politique concernant les passkeys synchronisées restent limitées par D-3 à D-5. Référence : [W3C WebAuthn Level 3](https://www.w3.org/TR/webauthn-3/), sections « User Verification » et « User Verification Requirement ».
 - **Refus** de toute assertion valide sur un autre défi, d'un identifiant révoqué ou d'une demande qui n'est plus `PENDING`.
 
 ### 4.5 Énoncé canonique et fenêtre de validité
@@ -333,7 +336,7 @@ Le schéma de la section 4.1 ne fixe pas ce que le run reçoit lors de la consom
 
 - **OIDC lie la demande à un run.** Il fournit les champs de dépôt, de commit et de run de l'énoncé L1, mais **ne relève pas de la condition 1**. L'option D de la Phase C §5 vise l'identité de l'autorisateur humain, alors que le jeton OIDC du run identifie un job, pas une personne.
 - **WebAuthn est le mécanisme qui se rapproche de la condition 1**, au plus près de l'option B de la Phase C (confirmation hors bande d'un énoncé précis). Le vérificateur est sur le serveur, hors du processus Director. Cela répond à la limite 1 de la Phase C §3, sous l'hypothèse d'un serveur intègre.
-- **La condition 1 reste ouverte** tant que le propriétaire n'a pas tranché D-2 à D-5 et que les exigences de validation des sections 9 et 11 ne sont pas satisfaites.
+- **La condition 1 reste ouverte** : D-2 fixe le protocole WebAuthn mais ne prouve pas l'identité civile. Les décisions D-3 à D-5 et les preuves de validation des sections 9 et 11 restent nécessaires.
 - Les conditions 2, 3, 5 et 7 restent dans leur état décrit par la Phase A.
 
 **Racines de confiance hors du modèle :**
@@ -466,9 +469,9 @@ Règles communes :
 | # | Décision | Options principales |
 |---|---|---|
 | D-1 | **Décidée le 2026-10-07 — courtier E-2** | Toute clé API dédiée à ce chemin serait détenue uniquement par le service ; état anti-rejeu durable sur le serveur. Autres accès au compte hors périmètre. Choix de conception seulement, sans implémentation ni ouverture du Provider |
-| D-2 | Facteur d'authentification | Clé de sécurité matérielle liée à l'appareil, passkey de plateforme, ou les deux ; exigence de vérification de l'utilisateur ; racine de confiance de l'inscription (clé SSH d'administration ou autre) |
+| D-2 | **Décidée par délégation le 2026-10-07 — WebAuthn avec vérification locale obligatoire** | WebAuthn est le seul facteur normal pour approuver une demande. L'option `userVerification=required` est demandée et le drapeau UV doit être vérifié pour chaque approbation ; aucun repli d'approbation par mot de passe de compte, courriel ou SMS. L'inscription reste fermée par défaut et requiert une invitation à usage unique créée depuis une session SSH d'administration. Le premier drapeau UV d'un nouvel identifiant n'autorise pas sa propre inscription. Choix de conception seulement ; type d'authentificateur (clé matérielle, passkey de plateforme ou les deux) et passkeys synchronisées (D-4), ainsi que nombre et récupération des identifiants (D-3), restent ouverts |
 | D-3 | Récupération | Nombre minimal d'identifiants enregistrés ; procédure de perte ou de vol ; qui peut inscrire un remplaçant, et comment |
-| D-4 | Passkeys synchronisées | Autorisées, interdites (attestation vérifiable exigée, section 4.4), ou autorisées sous conditions (drapeaux BE/BS) |
+| D-4 | Types d'authentificateurs et passkeys synchronisées | Clé matérielle, passkey de plateforme ou les deux ; passkeys synchronisées autorisées, interdites (attestation vérifiable exigée, section 4.4), ou autorisées sous conditions (drapeaux BE/BS) |
 | D-5 | Approbateurs | Une seule personne ou plusieurs ; approbation à plusieurs ; séparation entre la personne qui lance le run et celle qui approuve |
 | D-6 | Base de données | S-1, S-2 ou S-3 (section 3), après les preuves de la section 3.3 |
 | D-7 | Sauvegardes, rétention, témoin et ancre externe | Fréquence, emplacement hors du serveur, durée de conservation, chiffrement, exercice de restauration, emplacement du témoin de restauration, ancre J-c |
@@ -489,7 +492,7 @@ Règles communes :
 Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 
 1. **Revue de ce document G1** par le propriétaire, puis fusion éventuelle par PR.
-2. **Décisions écrites** D-2 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 est déjà décidée pour la conception ; elle ne constitue pas une autorisation d'implémenter ou d'ouvrir le Provider.
+2. **Décisions écrites** D-3 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 et D-2 sont décidées pour la conception ; elles ne constituent pas une autorisation d'implémenter ou d'ouvrir le Provider.
 3. **Vérifications documentaires** : offres, tarifs TTC et fonctions de console de Scaleway ; plan GitHub ; versions des paquets Ubuntu.
    - L'essai avec un **jeton OIDC réel** exige une **autorisation explicite et distincte du propriétaire**.
    - Il passerait par un workflow dédié qui n'affiche jamais le jeton brut, seulement des claims décodés non sensibles, et n'appelle aucun service.
