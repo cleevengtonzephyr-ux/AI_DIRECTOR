@@ -1,8 +1,8 @@
 # Phase G1 — Conception du service d'approbation humaine
 
-- **Date :** 2026-10-07
+- **Date :** 2026-10-08
 - **Référence :** `main` à `f687973568d787e2b2e0051a4632cbbe962de94b` (fusion de la PR #6, Phase F)
-- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-7 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
+- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-8 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
 
 **NO-GO en vigueur. Provider = CLOSED.** La décision de [`phase_a_real_generation_decision.md`](phase_a_real_generation_decision.md) est inchangée. Ce document prolonge la conception de l'identité ([`phase_c_authorizer_identity_design.md`](phase_c_authorizer_identity_design.md)), celle des limites de l'autorisation, du plafond, de la révocation et de l'arrêt ([`phase_e_authorization_limits_ceiling_revocation_shutdown_design.md`](phase_e_authorization_limits_ceiling_revocation_shutdown_design.md)) et le chemin de production fermé ([`phase_f_production_path_design.md`](phase_f_production_path_design.md)). Il ne résout aucune des sept conditions de la Phase A. Aucun des quatre verrous d'exécution ni des verrous F-1 à F-4 n'est modifié.
 
@@ -45,6 +45,7 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Décision prise sous délégation explicite du propriétaire** | D-3 : deux identifiants WebAuthn distincts sur deux authentificateurs séparés ; fermeture immédiate et révocation en cas de perte ; remplacement seulement par la procédure SSH d'administration | Section 4.4, décision D-3 |
 | **Décision prise sous délégation explicite du propriétaire** | D-4 : passkeys de plateforme et clés de sécurité acceptées ; une passkey synchronisable peut servir d'identifiant courant, mais le secours doit être un identifiant distinct non synchronisable (`BE=0`) | Section 4.4, décision D-4 |
 | **Décision prise sous délégation explicite du propriétaire** | D-5 : une approbation WebAuthn par une personne autorisée distincte de l'acteur GitHub qui a lancé le run ; aucun auto-approuveur et aucun quorum supplémentaire | Section 4.4, décision D-5 |
+| **Décision prise sous délégation explicite du propriétaire** | D-8 : 10 minutes pour approuver depuis `requested_at`, validité de 300 secondes depuis `authorized_at`, et attente totale du job plafonnée à 15 minutes ; la première échéance atteinte bloque, sans prolongation ni réutilisation | Sections 4.5 et 10, décision D-8 |
 | **Ouvert** | Forme de la réponse du service et sa vérification par le Director | Section 4.11, décision D-18 |
 | **Ouvert** | Réapprobation d'un même manifeste | Section 4.6, décision D-17 |
 | **Ouvert** | Exposition web : ports, TLS, reverse proxy | Section 7, décision D-12 |
@@ -232,10 +233,10 @@ Il prolonge l'exigence L1 de la Phase C. Il est sérialisé en JSON à clés tri
 - `repository_id`, `repository`, `sha`, `workflow_ref`, `run_id`, `run_attempt` (issus du jeton vérifié) ;
 - `manifest_sha256` (modèle, paramètres vidéo et empreintes des médias, Phase F) ;
 - `approval_id` et nonce, choisis par le service. `approval_id` doit respecter le format accepté par le script de Phase F (`[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}`) ;
-- `requested_at` (création de la demande), `approval_deadline` (délai d'attente de l'humain, D-8) et `validity_seconds` (au plus 300) ;
+- `requested_at` (création de la demande), `approval_deadline` (= `requested_at` + 600 secondes) et `validity_seconds` (= 300 secondes, D-8) ;
 - plafond de crédits par requête : **aucun montant n'est fixé ici**. Tant que le propriétaire n'en a pas fixé, ce champ est vide et toute demande est refusée (condition 3).
 
-**Fenêtre de validité (proposition).** L'instant d'autorisation (`authorized_at`) est l'instant où le service vérifie l'assertion WebAuthn, et non la création de la demande. L'autorisation expire à `authorized_at` + `validity_seconds`, soit 300 s au plus, conformément à la condition 2 et au contrôle existant de la Gate (`MAX_AUTHORIZATION_AGE_SECONDS = 300.0`, `_authorization_freshness_reasons()` dans `agents/generation_approval_gate.py`). Le délai d'attente de l'humain s'ajoute **avant** cet instant, sans jamais prolonger la fenêtre de 300 s.
+**Délais retenus (D-8).** `approval_deadline` est fixé à `requested_at` + 600 secondes. Une assertion reçue à l'échéance ou après (`now >= approval_deadline`) est refusée ; elle ne peut ni prolonger ni renouveler la demande. `authorized_at` est l'instant où le service vérifie l'assertion WebAuthn. L'autorisation expire à `authorized_at` + 300 secondes, et toute consommation à l'échéance ou après est refusée, conformément à la condition 2 et au contrôle existant de la Gate (`MAX_AUTHORIZATION_AGE_SECONDS = 300.0`, `_authorization_freshness_reasons()` dans `agents/generation_approval_gate.py`). Le job GitHub ne peut attendre plus de 15 minutes au total à partir de son démarrage ; aucune reconnexion, interrogation répétée ou relance ne remet ce délai à zéro. La première échéance atteinte — échéance d'approbation, expiration de l'autorisation ou plafond total du job — provoque un refus fermé. Il faut alors une nouvelle demande et une nouvelle assertion WebAuthn.
 
 **Relation avec la limite A2-b.** Le manifeste contient les paramètres vidéo, mais cela ne couvre A2-b qu'au niveau du service. A2-b porte sur `RealGenerationAuthorization` et sur le Provider, qui ne reçoit pas l'autorisation. Elle ne serait couverte dans le Director que si la Gate et le Provider vérifiaient l'empreinte de l'énoncé (exigences L2 et L7 de la Phase C). Ce point est à concevoir (section 4.11).
 
@@ -258,7 +259,7 @@ L'énoncé affiché à l'humain doit être exactement celui dont l'empreinte ent
 | `PENDING` | Demande reçue d'un run vérifié | `APPROVED`, `DENIED`, `EXPIRED`, `REVOKED` |
 | `APPROVED` | Assertion WebAuthn valide sur l'énoncé | `CONSUMED`, `EXPIRED`, `REVOKED` |
 | `DENIED` | Refus explicite de l'humain | Terminal |
-| `EXPIRED` | Échéance dépassée (`approval_deadline` ou fenêtre de validité) | Terminal |
+| `EXPIRED` | Échéance dépassée (`approval_deadline`, fenêtre de validité ou plafond du job) | Terminal ; aucune prolongation, une nouvelle demande est requise |
 | `REVOKED` | Révocation humaine authentifiée | Terminal |
 | `CONSUMED` | Délivrée une fois au run | **Terminal tant que Provider = CLOSED.** `IN_FLIGHT` ne deviendrait possible qu'après une décision distincte de réouverture |
 | `IN_FLIGHT` | Envoi au fournisseur commencé (inatteignable aujourd'hui) | `ACCEPTED`, `REFUSED`, `NOT_SENT`, `AMBIGUOUS` |
@@ -462,7 +463,7 @@ Règles communes :
   - **non annoncée**, y compris par restauration du volume entier : l'ancre externe indépendante doit détecter le recul et provoquer un refus fermé ; l'indisponibilité ou l'absence de l'ancre bloque aussi le service (section 3.4) ;
   - traitement des fichiers `-wal` et `-shm` vérifié.
 - **X6. Refus fermé.** Refus pour chacun des cas suivants : interrupteur absent ou corrompu ; version de schéma inattendue ; chaîne de journal rompue ; échec d'écriture du journal (aucune transition, la transaction étant atomique) ; `synchronous` relu différent de `FULL` ; base absente, corrompue ou en lecture seule ; disque plein ; verrou tenu au-delà du délai.
-- **X7. Horloge.** Le dernier instant observé est conservé. Tout recul de l'horloge est refusé, sans prolongation de fenêtre (A2-g). Si l'option est retenue, refus quand la synchronisation NTP n'est pas établie.
+- **X7. Horloge et échéances.** Le dernier instant observé est conservé. Tout recul de l'horloge est refusé, sans prolongation de fenêtre (A2-g). Tester les bornes `now < approval_deadline`/`now >= approval_deadline` et `now < authorized_at + 300 s`/`now >= authorized_at + 300 s` ; assertion tardive, consommation expirée et plafond total du job atteint doivent tous être refusés. Vérifier qu'aucune reconnexion, interrogation répétée ou relance ne réinitialise les délais. Si l'option est retenue, refus quand la synchronisation NTP n'est pas établie.
 - **X8. Secrets et droits.**
   - des valeurs sentinelles (jeton, assertion, secret) sont injectées puis recherchées dans tous les journaux du service et du système : aucune occurrence ;
   - base, témoin et journal ne sont lisibles que par `aidirector`.
@@ -478,7 +479,7 @@ Règles communes :
 | D-5 | **Décidée par délégation le 2026-10-07 — un approbateur, séparation obligatoire** | Une seule approbation WebAuthn suffit, sans quorum supplémentaire. L'approbateur autorisé doit être distinct de l'acteur GitHub qui lance le run ; auto-approbation refusée. Si cette séparation ne peut pas être vérifiée, refus fermé. L'identification des comptes et la protection des comptes relèvent aussi de D-15. Choix de conception seulement, sans implémentation |
 | D-6 | **Choix de conception conditionnel sous délégation le 2026-10-08 — S-1 SQLite** | SQLite est la cible de conception G2. Avant toute mise en service, réussir et consigner les preuves 2 et 3 de la section 3.3 ; si elles échouent, réexaminer S-2 ou S-3. Aucune base n'est créée ni déployée |
 | D-7 | **Choix de conception conditionnel sous délégation le 2026-10-08 — sauvegardes et ancre J-c** | Sauvegarde quotidienne chiffrée hors serveur, 30 jours de rétention, exercice mensuel de restauration isolé, témoin local hors sauvegarde et ancre externe append-only par tête de journal ; en cas d'indisponibilité ou de divergence, refus fermé. Le fournisseur, le compte, la méthode de chiffrement et le coût restent ouverts (D-13, D-15, section 8). Aucune sauvegarde ni aucun ancrage n'est configuré |
-| D-8 | Délais | Délai d'attente de l'humain (`approval_deadline`), fenêtre de validité (au plus 300 s), durée maximale du job en attente |
+| D-8 | **Décidée par délégation le 2026-10-08 — délais** | Approbation dans les 10 minutes suivant `requested_at` ; assertion refusée à `approval_deadline` ou après. Autorisation valable 300 secondes depuis `authorized_at`, consommation refusée à l'échéance ou après. Attente totale du job limitée à 15 minutes depuis son démarrage ; la première échéance atteinte bloque. Aucun délai n'est prolongé ou remis à zéro et aucune approbation expirée n'est réutilisable ; nouvelle demande et nouvelle assertion requises. Décision de conception uniquement, sans implémentation |
 | D-9 | Interrupteur et révocation | Qui ferme, qui rouvre, par quel geste et quel acte écrit ; authentification de la révocation ; révocation annulable ou non |
 | D-10 | Commits autorisés | Options (i), (ii) ou (iii) de la section 4.3 |
 | D-11 | Manifeste et contenu montré | Option (a) ou (b) de la section 4.3 |
@@ -495,7 +496,7 @@ Règles communes :
 Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 
 1. **Revue de ce document G1** par le propriétaire, puis fusion éventuelle par PR.
-2. **Décisions écrites** D-8 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-7 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6 et D-7, les preuves de durabilité, de chiffrement et de restauration ainsi que la vérification des coûts restent préalables à toute mise en service.
+2. **Décisions écrites** D-9 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-8 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6 et D-7, les preuves de durabilité, de chiffrement et de restauration ainsi que la vérification des coûts restent préalables à toute mise en service.
 3. **Vérifications documentaires** : offres, tarifs TTC et fonctions de console de Scaleway ; plan GitHub ; versions des paquets Ubuntu.
    - L'essai avec un **jeton OIDC réel** exige une **autorisation explicite et distincte du propriétaire**.
    - Il passerait par un workflow dédié qui n'affiche jamais le jeton brut, seulement des claims décodés non sensibles, et n'appelle aucun service.
