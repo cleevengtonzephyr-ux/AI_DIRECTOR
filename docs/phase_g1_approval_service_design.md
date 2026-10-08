@@ -2,7 +2,7 @@
 
 - **Date :** 2026-10-08
 - **Référence :** `main` à `f687973568d787e2b2e0051a4632cbbe962de94b` (fusion de la PR #6, Phase F)
-- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-10 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
+- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-11 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
 
 **NO-GO en vigueur. Provider = CLOSED.** La décision de [`phase_a_real_generation_decision.md`](phase_a_real_generation_decision.md) est inchangée. Ce document prolonge la conception de l'identité ([`phase_c_authorizer_identity_design.md`](phase_c_authorizer_identity_design.md)), celle des limites de l'autorisation, du plafond, de la révocation et de l'arrêt ([`phase_e_authorization_limits_ceiling_revocation_shutdown_design.md`](phase_e_authorization_limits_ceiling_revocation_shutdown_design.md)) et le chemin de production fermé ([`phase_f_production_path_design.md`](phase_f_production_path_design.md)). Il ne résout aucune des sept conditions de la Phase A. Aucun des quatre verrous d'exécution ni des verrous F-1 à F-4 n'est modifié.
 
@@ -48,6 +48,7 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Décision prise sous délégation explicite du propriétaire** | D-8 : 10 minutes pour approuver depuis `requested_at`, validité de 300 secondes depuis `authorized_at`, et attente totale du job plafonnée à 15 minutes ; la première échéance atteinte bloque, sans prolongation ni réutilisation | Sections 4.5 et 10, décision D-8 |
 | **Décision prise sous délégation explicite du propriétaire** | D-9 : interrupteur fermé par défaut ; fermeture d'urgence depuis SSH sans WebAuthn ; réouverture manuelle depuis SSH avec confirmation WebAuthn fraîche et journalisation ; révocations définitives | Sections 4.8 et 10, décision D-9 |
 | **Décision prise sous délégation explicite du propriétaire** | D-10 : liste persistante de SHA complets autorisés explicitement par WebAuthn après fusion dans `main` ; tout SHA absent, différent ou révoqué est refusé | Sections 4.3 et 10, décision D-10 |
+| **Décision prise sous délégation explicite du propriétaire** | D-11 : copie figée des seuls assets verrouillés de Video 005 ; le service recalcule le manifeste et montre le contenu réel à l'approbateur | Sections 4.3 et 10, décision D-11 |
 | **Ouvert** | Forme de la réponse du service et sa vérification par le Director | Section 4.11, décision D-18 |
 | **Ouvert** | Réapprobation d'un même manifeste | Section 4.6, décision D-17 |
 | **Ouvert** | Exposition web : ports, TLS, reverse proxy | Section 7, décision D-12 |
@@ -192,14 +193,9 @@ D'où l'exigence de journaux sans jeton et d'actions épinglées.
 
 La liste explicite lie l'autorisation à une action humaine et à un commit immuable. La condition de fusion dans `main` et de CI verte doit être vérifiée avant l'inscription ; la protection effective de `main` et la preuve de cette vérification restent liées aux décisions de sécurité GitHub de D-15. Cette décision ne choisit ni n'implémente le mécanisme de vérification GitHub du service.
 
-Le service ne peut pas recalculer lui-même le manifeste sans disposer des fichiers sources (prompt, avatar, référence visage). Options (D-11) :
+**Décision D-11, sous délégation explicite du propriétaire : option (b).** Le service garde une copie figée des seuls fichiers de la Release Candidate Video 005 (prompt, avatar et référence visage), liée aux empreintes verrouillées de cette version, et recalcule lui-même le manifeste. Il n'accepte aucun asset arbitraire téléversé par un run. Avant toute approbation, il vérifie que le manifeste canonique transmis correspond exactement à celui recalculé depuis le jeu d'assets verrouillé ; un asset manquant, supplémentaire ou modifié, ou toute divergence de paramètres ou d'empreintes, bloque la demande. La page d'approbation présente le contenu réel et les paramètres, pas seulement les empreintes.
 
-- (a) faire confiance au manifeste transmis par un run dont le commit est autorisé. Le service peut recalculer `manifest_sha256` à partir de la forme canonique reçue, mais pas à partir des fichiers ;
-- (b) conserver sur le serveur une copie figée des assets Video 005 et recalculer.
-
-**Hypothèses de (a).** Le code exécuté par le job est celui du commit autorisé, y compris les actions épinglées. L'image du runner et les binaires téléchargés à l'exécution (par exemple l'interpréteur installé par `setup-python`) sont eux aussi intègres.
-
-**Ce que voit l'approbateur.** La forme canonique du manifeste de Phase F contient le modèle, les paramètres et les empreintes des médias, mais pas le prompt ni les images. Avec (a), l'approbateur consent à des **empreintes**, pas à un contenu qu'il a vu. Avec (b), le service pourrait afficher le contenu, au prix d'une copie à maintenir et d'un contenu stocké sur le serveur.
+Cette décision de conception évite de demander à l'approbateur de consentir à des empreintes seules, mais elle entraîne le stockage de contenu sensible sur le serveur. Avant toute mise en service, l'accès doit être limité à `aidirector`, les fichiers exclus des journaux, protégés au repos et couverts par une politique de sauvegarde, de rétention et de suppression cohérente avec D-7, D-13 et D-15. Les détails de chiffrement et de cycle de vie restent à vérifier ; aucun asset n'est copié sur le serveur par cette décision.
 
 ### 4.4 Approbation humaine : WebAuthn
 
@@ -329,7 +325,7 @@ Le schéma de la section 4.1 ne fixe pas ce que le run reçoit lors de la consom
 | | **OIDC GitHub** | **WebAuthn** |
 |---|---|---|
 | **Prouve** | GitHub a émis ce jeton, pendant sa courte validité, pour un job d'un dépôt, d'un workflow, d'une référence, d'un commit et d'un run donnés | Le détenteur d'un identifiant enregistré a signé ce défi précis, pour cette origine, avec présence et, si UV est exigé, vérification locale de l'utilisateur (biométrie ou code de l'appareil) |
-| **Ne prouve pas** | Qu'un humain a consenti à l'énoncé. Le compte GitHub qui a lancé le run (claim `actor`, à confirmer) n'est pas une preuve de consentement. Que les étapes du job n'ont pas été modifiées au-delà de ce que contient le commit. Que le manifeste transmis a été calculé honnêtement | L'identité civile de la personne. Qu'elle a lu ou compris l'énoncé : le serveur choisit ce qu'il affiche, et l'authentificateur signe le défi, pas le texte affiché. Avec l'option (a) de D-11, qu'elle a vu le contenu : elle consent à des empreintes |
+| **Ne prouve pas** | Qu'un humain a consenti à l'énoncé. Le compte GitHub qui a lancé le run (claim `actor`, à confirmer) n'est pas une preuve de consentement. Que les étapes du job n'ont pas été modifiées au-delà de ce que contient le commit. Que le manifeste transmis a été calculé honnêtement | L'identité civile de la personne. Qu'elle a lu ou compris l'énoncé : l'authentificateur signe le défi, pas le texte affiché. D-11 exige que l'affichage corresponde au manifeste recalculé, mais WebAuthn ne prouve pas que l'humain a effectivement regardé le contenu |
 | **Hypothèses de confiance** | GitHub (émetteur, publication des clés, TLS) ; protection de la branche `main` et du compte GitHub du propriétaire ; épinglage des actions (toute étape du job peut demander un jeton si la permission est accordée) ; intégrité de l'image du runner et des binaires téléchargés ; runner hébergé par GitHub ; aucun accès aux jetons depuis des forks | Intégrité du serveur et du code qui affiche l'énoncé ; intégrité du poste et du navigateur de l'approbateur ; contrôle exclusif de l'authentificateur ; pour une passkey synchronisée, sécurité du compte du fournisseur de synchronisation ; intégrité de l'inscription (section 4.4) |
 | **Limites** | Le jeton est porteur : quiconque le détient pendant sa validité peut le présenter (section 4.2). Le service doit atteindre les clés publiques de GitHub ; s'il ne le peut pas, il refuse | Un serveur compromis, ou un script injecté dans la page, peut afficher un énoncé et en faire signer un autre. Une passkey synchronisée se copie sur tous les appareils du compte. Le compteur de signatures ne détecte pas toujours un clonage |
 
@@ -447,6 +443,7 @@ Règles communes :
   - UP ou UV à 0 ; identifiant révoqué ; régression du compteur, selon la politique retenue ;
   - assertion rejouée ; assertion de la demande A présentée pour la demande B ; défi expiré ;
   - drapeaux BE/BS non conformes à D-4.
+  - **D-11** : asset attendu absent, asset supplémentaire ou modifié, paramètres divergents, ou manifeste du run différent du manifeste recalculé ; aucune approbation n'est délivrée et le contenu sensible n'est pas écrit dans les journaux. Vérifier que le contenu affiché correspond exactement au manifeste recalculé.
 - **X3. Concurrence.** N processus **et** N threads, démarrés ensemble par une barrière, répétés au moins 1 000 fois. N et le nombre de répétitions sont fixés et consignés avant l'essai. Résultats attendus :
   - exactement une consommation ;
   - courses consommation/révocation, consommation/expiration et consommation/fermeture de l'interrupteur : aucune consommation après une révocation ou une fermeture confirmée ;
@@ -480,7 +477,7 @@ Règles communes :
 | D-8 | **Décidée par délégation le 2026-10-08 — délais** | Approbation dans les 10 minutes suivant `requested_at` ; assertion refusée à `approval_deadline` ou après. Autorisation valable 300 secondes depuis `authorized_at`, consommation refusée à l'échéance ou après. Attente totale du job limitée à 15 minutes depuis son démarrage ; la première échéance atteinte bloque. Aucun délai n'est prolongé ou remis à zéro et aucune approbation expirée n'est réutilisable ; nouvelle demande et nouvelle assertion requises. Décision de conception uniquement, sans implémentation |
 | D-9 | **Décidée par délégation le 2026-10-08 — interrupteur et révocation** | Fermé par défaut ; SSH d'administration suffit pour la fermeture d'urgence. Réouverture manuelle par SSH avec assertion WebAuthn fraîche, vérification locale et journalisation atomique, après rapprochement de la base, du journal, du témoin et de l'ancre ; sinon refus fermé. Les révocations de demandes, identifiants et commits sont définitives ; un nouvel identifiant nécessite une nouvelle invitation SSH. Aucun redémarrage ni restauration ne rouvre le service. Choix de conception seulement : Provider = CLOSED et NO-GO inchangés |
 | D-10 | **Décidée par délégation le 2026-10-08 — inscription explicite des commits** | Option (ii) : inscrire individuellement par WebAuthn le SHA complet d'un commit seulement après sa fusion dans `main` et la réussite de CI. À chaque demande, le SHA OIDC doit correspondre exactement à une entrée active. SHA abrégé, inconnu, différent ou révoqué refusé ; révocation définitive. Les protections de `main` et la manière de vérifier l'éligibilité restent à préciser avec D-15. Décision de conception seulement, sans implémentation |
-| D-11 | Manifeste et contenu montré | Option (a) ou (b) de la section 4.3 |
+| D-11 | **Décidée par délégation le 2026-10-08 — recomposition et présentation du manifeste** | Option (b) : copie figée limitée aux assets verrouillés de Video 005 ; recalcul du manifeste côté service et comparaison exacte avec le manifeste du run ; affichage du prompt, des paramètres et des médias réels avant approbation. Aucun asset arbitraire accepté. Accès, chiffrement, sauvegarde, rétention et suppression doivent être démontrés avant mise en service. Aucun fichier n'est copié ou déployé à cette étape |
 | D-12 | Exposition web | Ports, TLS, reverse proxy, limitation de débit, sécurité de la page (section 7) |
 | D-13 | Dépendances | Abandon de la règle « bibliothèque standard uniquement » pour la vérification OIDC et WebAuthn (et R-1 ou (iii) le cas échéant) ; bibliothèques choisies, épinglage, mise à jour |
 | D-14 | Plafonds de dépense | Montant par requête et existence d'un plafond par période (condition 3). **Aucun montant n'est fixé par ce document** |
@@ -494,13 +491,13 @@ Règles communes :
 Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 
 1. **Revue de ce document G1** par le propriétaire, puis fusion éventuelle par PR.
-2. **Décisions écrites** D-11 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-10 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6 et D-7, les preuves de durabilité, de chiffrement et de restauration ainsi que la vérification des coûts restent préalables à toute mise en service.
+2. **Décisions écrites** D-12 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-11 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6, D-7 et D-11, les preuves de durabilité, de chiffrement, de sauvegarde, de restauration, de rétention et de suppression ainsi que la vérification des coûts restent préalables à toute mise en service.
 3. **Vérifications documentaires** : offres, tarifs TTC et fonctions de console de Scaleway ; plan GitHub ; versions des paquets Ubuntu.
    - L'essai avec un **jeton OIDC réel** exige une **autorisation explicite et distincte du propriétaire**.
    - Il passerait par un workflow dédié qui n'affiche jamais le jeton brut, seulement des claims décodés non sensibles, et n'appelle aucun service.
 4. **Phase G2, implémentation mock-only** sur le poste de développement :
-   - contenu : énoncé canonique, vérificateurs OIDC et WebAuthn testés avec des clés générées par les tests, machine à états, stockage, témoin, journal, interrupteur, réponse du service selon D-18 ;
-   - aucun réseau, aucun secret réel ;
+   - contenu : énoncé canonique, vérificateurs OIDC et WebAuthn testés avec des clés générées par les tests, machine à états, stockage, témoin, journal, interrupteur, réponse du service selon D-18, recalcul et présentation du manifeste D-11 ;
+   - aucun réseau, aucun secret réel, aucun asset réel de Video 005 (fixtures synthétiques uniquement) ;
    - des **gardes documentaires**, sur le modèle de `tests/test_phase_e1_documentary_invariants.py`, protègent G1 : NO-GO, Provider = CLOSED, absence de montant, liens valides ;
    - les quatre verrous, F-1 à F-4, les cardinalités et `NO_DRIFT` restent verts.
 5. **Campagne Linux** de la section 9 (V-1 à V-3, X1 à X8), avec procès-verbal consigné. Déployer du code, même de test, sur le serveur exige une **autorisation explicite et distincte du propriétaire**, sans ouverture de port.
