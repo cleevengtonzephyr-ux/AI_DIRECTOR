@@ -2,7 +2,7 @@
 
 - **Date :** 2026-10-08
 - **Référence :** `main` à `f687973568d787e2b2e0051a4632cbbe962de94b` (fusion de la PR #6, Phase F)
-- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-8 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
+- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-9 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
 
 **NO-GO en vigueur. Provider = CLOSED.** La décision de [`phase_a_real_generation_decision.md`](phase_a_real_generation_decision.md) est inchangée. Ce document prolonge la conception de l'identité ([`phase_c_authorizer_identity_design.md`](phase_c_authorizer_identity_design.md)), celle des limites de l'autorisation, du plafond, de la révocation et de l'arrêt ([`phase_e_authorization_limits_ceiling_revocation_shutdown_design.md`](phase_e_authorization_limits_ceiling_revocation_shutdown_design.md)) et le chemin de production fermé ([`phase_f_production_path_design.md`](phase_f_production_path_design.md)). Il ne résout aucune des sept conditions de la Phase A. Aucun des quatre verrous d'exécution ni des verrous F-1 à F-4 n'est modifié.
 
@@ -46,6 +46,7 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Décision prise sous délégation explicite du propriétaire** | D-4 : passkeys de plateforme et clés de sécurité acceptées ; une passkey synchronisable peut servir d'identifiant courant, mais le secours doit être un identifiant distinct non synchronisable (`BE=0`) | Section 4.4, décision D-4 |
 | **Décision prise sous délégation explicite du propriétaire** | D-5 : une approbation WebAuthn par une personne autorisée distincte de l'acteur GitHub qui a lancé le run ; aucun auto-approuveur et aucun quorum supplémentaire | Section 4.4, décision D-5 |
 | **Décision prise sous délégation explicite du propriétaire** | D-8 : 10 minutes pour approuver depuis `requested_at`, validité de 300 secondes depuis `authorized_at`, et attente totale du job plafonnée à 15 minutes ; la première échéance atteinte bloque, sans prolongation ni réutilisation | Sections 4.5 et 10, décision D-8 |
+| **Décision prise sous délégation explicite du propriétaire** | D-9 : interrupteur fermé par défaut ; fermeture d'urgence depuis SSH sans WebAuthn ; réouverture manuelle depuis SSH avec confirmation WebAuthn fraîche et journalisation ; révocations définitives | Sections 4.8 et 10, décision D-9 |
 | **Ouvert** | Forme de la réponse du service et sa vérification par le Director | Section 4.11, décision D-18 |
 | **Ouvert** | Réapprobation d'un même manifeste | Section 4.6, décision D-17 |
 | **Ouvert** | Exposition web : ports, TLS, reverse proxy | Section 7, décision D-12 |
@@ -272,14 +273,14 @@ Le traitement de `NOT_SENT` (reprise possible selon la Phase F, ou nouvelle appr
 
 ### 4.8 Révocation et interrupteur global
 
-Proposition, sous réserve de D-9.
+**Décision D-9, sous délégation explicite du propriétaire.** Cette politique est un choix de conception uniquement ; aucun interrupteur, mécanisme de révocation ou accès serveur n'est configuré par cette décision.
 
-- **Révocation** : par demande, par identifiant WebAuthn ou par commit autorisé ; persistante et journalisée. Elle correspond à l'option R-a de la Phase E, dans la base plutôt que dans un fichier. Le mode d'authentification de la révocation (WebAuthn, SSH, les deux) relève de D-9.
-- **Interrupteur global** (options S-b et R-d de la Phase E) : **fermé par défaut**. Interrupteur absent, illisible ou corrompu signifie fermé. Il est lu dans la transaction de consommation.
-  - **Fermeture** : elle doit rester possible sans dépendre de l'interface web ni de WebAuthn, par une session SSH d'administration ou par la console de l'hébergeur (à vérifier, section 6).
-  - **Réouverture** : ses modalités relèvent de D-9.
-- **Portée de l'arrêt.** En E-1, une autorisation déjà délivrée au run reste utilisable jusqu'à son expiration, au plus 300 s, sauf si le Director revérifie auprès du service juste avant l'envoi (à concevoir, section 4.11). En E-2, la fermeture s'applique à toute soumission non encore commencée.
-- L'interrupteur ne remplace aucun verrou : les quatre verrous de la Phase A et F-1 à F-4 restent fermés dans le code.
+- **Interrupteur global** (options S-b et R-d de la Phase E) : **fermé par défaut**. Interrupteur absent, illisible ou corrompu, état de stockage incertain, restauration non rapprochée, journal rompu ou ancre externe indisponible signifie fermé. Il est vérifié dans la même transaction que la consommation ; état inconnu = refus.
+- **Fermeture d'urgence** : un administrateur authentifié par SSH peut fermer l'interrupteur sans WebAuthn, sans accès web et sans dépendre de GitHub. La fermeture est prioritaire, persistante et inscrite au journal dans la même transaction ; si l'écriture ou sa confirmation échoue, le service reste indisponible et fermé par défaut. Les conditions de récupération de l'accès SSH restent à vérifier (section 6).
+- **Réouverture** : uniquement par une action manuelle depuis SSH d'administration, accompagnée d'une assertion WebAuthn fraîche avec vérification locale obligatoire, par un approbateur autorisé distinct de l'acteur GitHub du run concerné. L'action indique un motif, est journalisée atomiquement et n'est acceptée que si l'état de la base, du journal, du témoin et de l'ancre externe a été rapproché. Aucun redémarrage, restauration ou expiration ne rouvre l'interrupteur automatiquement. Si une condition n'est pas démontrée, il reste fermé.
+- **Révocations** : une demande ou approbation, un identifiant WebAuthn ou un commit autorisé révoqué ne peut pas être réactivé ni annulé. Toute reprise exige une nouvelle demande et une nouvelle approbation ; le remplacement d'un identifiant révoqué passe par une nouvelle invitation à usage unique créée par SSH, conformément à D-2 et D-3. Toute révocation est persistante et journalisée atomiquement.
+- **Portée de l'arrêt** : en E-1, une autorisation déjà délivrée au run reste utilisable jusqu'à son expiration (300 s au plus), sauf nouvelle vérification auprès du service juste avant l'envoi (à concevoir, section 4.11). En E-2, la fermeture bloque toute soumission non commencée. Cette limite doit être prise en compte avant tout choix E-1/E-2 définitif.
+- L'interrupteur ne remplace aucun verrou : les quatre verrous de la Phase A et F-1 à F-4 restent fermés dans le code. Sa réouverture ne constitue jamais une ouverture du Provider et ne modifie pas le NO-GO.
 
 ### 4.9 Journal
 
@@ -462,7 +463,7 @@ Règles communes :
   - **annoncée** : sauvegarde, consommation, restauration ; l'approbation consommée n'est pas réutilisable, l'interrupteur est fermé, et toute divergence base/témoin/ancre bloque le service ;
   - **non annoncée**, y compris par restauration du volume entier : l'ancre externe indépendante doit détecter le recul et provoquer un refus fermé ; l'indisponibilité ou l'absence de l'ancre bloque aussi le service (section 3.4) ;
   - traitement des fichiers `-wal` et `-shm` vérifié.
-- **X6. Refus fermé.** Refus pour chacun des cas suivants : interrupteur absent ou corrompu ; version de schéma inattendue ; chaîne de journal rompue ; échec d'écriture du journal (aucune transition, la transaction étant atomique) ; `synchronous` relu différent de `FULL` ; base absente, corrompue ou en lecture seule ; disque plein ; verrou tenu au-delà du délai.
+- **X6. Refus fermé et D-9.** Refus pour chacun des cas suivants : interrupteur absent ou corrompu ; version de schéma inattendue ; chaîne de journal rompue ; échec d'écriture du journal (aucune transition, la transaction étant atomique) ; `synchronous` relu différent de `FULL` ; base absente, corrompue ou en lecture seule ; disque plein ; verrou tenu au-delà du délai. Vérifier aussi qu'une fermeture SSH rend immédiatement toute consommation impossible, qu'aucun redémarrage ou restauration ne rouvre l'interrupteur, qu'une réouverture sans assertion WebAuthn fraîche ou avec état/ancre non rapproché est refusée, et qu'aucune révocation ne peut être annulée.
 - **X7. Horloge et échéances.** Le dernier instant observé est conservé. Tout recul de l'horloge est refusé, sans prolongation de fenêtre (A2-g). Tester les bornes `now < approval_deadline`/`now >= approval_deadline` et `now < authorized_at + 300 s`/`now >= authorized_at + 300 s` ; assertion tardive, consommation expirée et plafond total du job atteint doivent tous être refusés. Vérifier qu'aucune reconnexion, interrogation répétée ou relance ne réinitialise les délais. Si l'option est retenue, refus quand la synchronisation NTP n'est pas établie.
 - **X8. Secrets et droits.**
   - des valeurs sentinelles (jeton, assertion, secret) sont injectées puis recherchées dans tous les journaux du service et du système : aucune occurrence ;
@@ -480,7 +481,7 @@ Règles communes :
 | D-6 | **Choix de conception conditionnel sous délégation le 2026-10-08 — S-1 SQLite** | SQLite est la cible de conception G2. Avant toute mise en service, réussir et consigner les preuves 2 et 3 de la section 3.3 ; si elles échouent, réexaminer S-2 ou S-3. Aucune base n'est créée ni déployée |
 | D-7 | **Choix de conception conditionnel sous délégation le 2026-10-08 — sauvegardes et ancre J-c** | Sauvegarde quotidienne chiffrée hors serveur, 30 jours de rétention, exercice mensuel de restauration isolé, témoin local hors sauvegarde et ancre externe append-only par tête de journal ; en cas d'indisponibilité ou de divergence, refus fermé. Le fournisseur, le compte, la méthode de chiffrement et le coût restent ouverts (D-13, D-15, section 8). Aucune sauvegarde ni aucun ancrage n'est configuré |
 | D-8 | **Décidée par délégation le 2026-10-08 — délais** | Approbation dans les 10 minutes suivant `requested_at` ; assertion refusée à `approval_deadline` ou après. Autorisation valable 300 secondes depuis `authorized_at`, consommation refusée à l'échéance ou après. Attente totale du job limitée à 15 minutes depuis son démarrage ; la première échéance atteinte bloque. Aucun délai n'est prolongé ou remis à zéro et aucune approbation expirée n'est réutilisable ; nouvelle demande et nouvelle assertion requises. Décision de conception uniquement, sans implémentation |
-| D-9 | Interrupteur et révocation | Qui ferme, qui rouvre, par quel geste et quel acte écrit ; authentification de la révocation ; révocation annulable ou non |
+| D-9 | **Décidée par délégation le 2026-10-08 — interrupteur et révocation** | Fermé par défaut ; SSH d'administration suffit pour la fermeture d'urgence. Réouverture manuelle par SSH avec assertion WebAuthn fraîche, vérification locale et journalisation atomique, après rapprochement de la base, du journal, du témoin et de l'ancre ; sinon refus fermé. Les révocations de demandes, identifiants et commits sont définitives ; un nouvel identifiant nécessite une nouvelle invitation SSH. Aucun redémarrage ni restauration ne rouvre le service. Choix de conception seulement : Provider = CLOSED et NO-GO inchangés |
 | D-10 | Commits autorisés | Options (i), (ii) ou (iii) de la section 4.3 |
 | D-11 | Manifeste et contenu montré | Option (a) ou (b) de la section 4.3 |
 | D-12 | Exposition web | Ports, TLS, reverse proxy, limitation de débit, sécurité de la page (section 7) |
@@ -496,7 +497,7 @@ Règles communes :
 Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 
 1. **Revue de ce document G1** par le propriétaire, puis fusion éventuelle par PR.
-2. **Décisions écrites** D-9 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-8 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6 et D-7, les preuves de durabilité, de chiffrement et de restauration ainsi que la vérification des coûts restent préalables à toute mise en service.
+2. **Décisions écrites** D-10 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-9 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6 et D-7, les preuves de durabilité, de chiffrement et de restauration ainsi que la vérification des coûts restent préalables à toute mise en service.
 3. **Vérifications documentaires** : offres, tarifs TTC et fonctions de console de Scaleway ; plan GitHub ; versions des paquets Ubuntu.
    - L'essai avec un **jeton OIDC réel** exige une **autorisation explicite et distincte du propriétaire**.
    - Il passerait par un workflow dédié qui n'affiche jamais le jeton brut, seulement des claims décodés non sensibles, et n'appelle aucun service.
