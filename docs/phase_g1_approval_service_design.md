@@ -2,7 +2,7 @@
 
 - **Date :** 2026-10-07
 - **Référence :** `main` à `f687973568d787e2b2e0051a4632cbbe962de94b` (fusion de la PR #6, Phase F)
-- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-5 sont choisies sous sa délégation explicite du 2026-10-07. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
+- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-7 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
 
 **NO-GO en vigueur. Provider = CLOSED.** La décision de [`phase_a_real_generation_decision.md`](phase_a_real_generation_decision.md) est inchangée. Ce document prolonge la conception de l'identité ([`phase_c_authorizer_identity_design.md`](phase_c_authorizer_identity_design.md)), celle des limites de l'autorisation, du plafond, de la révocation et de l'arrêt ([`phase_e_authorization_limits_ceiling_revocation_shutdown_design.md`](phase_e_authorization_limits_ceiling_revocation_shutdown_design.md)) et le chemin de production fermé ([`phase_f_production_path_design.md`](phase_f_production_path_design.md)). Il ne résout aucune des sept conditions de la Phase A. Aucun des quatre verrous d'exécution ni des verrous F-1 à F-4 n'est modifié.
 
@@ -39,7 +39,8 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Déclaré par le propriétaire, non vérifié par cette phase** | Configuration actuelle du serveur | Section 6 |
 | **Décision prise par le propriétaire** | D-1 : option E-2 (courtier) ; toute clé API dédiée à ce chemin serait détenue uniquement par le serveur, qui conserve l'état durable anti-rejeu sur son volume persistant. Choix de conception seulement : rien n'est implémenté et aucune clé n'a été créée | Instruction explicite du propriétaire, 2026-10-07 |
 | **Décision de conception conditionnelle sous délégation explicite** | D-6 : SQLite retenu comme cible de conception pour G2, sous réserve des preuves de durabilité et de restauration ; aucune base n'est créée ni déployée | Section 3, décision D-6 |
-| **Ouvert** | Validation de SQLite avant tout usage serveur, sauvegardes, rétention et ancre externe | Sections 3.3 et 3.4, décisions D-6 et D-7 |
+| **Décision de conception conditionnelle sous délégation explicite** | D-7 : sauvegarde chiffrée quotidienne hors serveur, rétention de 30 jours, restauration d'essai mensuelle et ancre externe append-only ; fournisseur et coût restent à vérifier | Section 3.4, décision D-7 |
+| **Ouvert** | Validation de SQLite avant tout usage serveur ; fournisseur et compte des sauvegardes/ancre ; chiffrement et coût TTC | Sections 3.3, 3.4 et 8 ; décisions D-6, D-7, D-13 et D-15 |
 | **Décision prise sous délégation explicite du propriétaire** | D-2 : WebAuthn est le seul facteur normal d'approbation ; la vérification locale de l'utilisateur est obligatoire ; l'inscription est réservée à une invitation à usage unique créée par SSH d'administration | Section 4.4, décision D-2 |
 | **Décision prise sous délégation explicite du propriétaire** | D-3 : deux identifiants WebAuthn distincts sur deux authentificateurs séparés ; fermeture immédiate et révocation en cas de perte ; remplacement seulement par la procédure SSH d'administration | Section 4.4, décision D-3 |
 | **Décision prise sous délégation explicite du propriétaire** | D-4 : passkeys de plateforme et clés de sécurité acceptées ; une passkey synchronisable peut servir d'identifiant courant, mais le secours doit être un identifiant distinct non synchronisable (`BE=0`) | Section 4.4, décision D-4 |
@@ -54,7 +55,7 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 
 | Constat | Conséquence pour G |
 |---|---|
-| La Phase F constate que les runners GitHub sont éphémères et que son journal, écrit dans `RUNNER_TEMP`, disparaît : aucun anti-rejeu entre exécutions | Selon D-1, le serveur et son volume persistant sont l'emplacement retenu en conception pour l'état durable. SQLite est la cible conditionnelle de D-6 ; les sauvegardes et mécanismes de restauration restent à décider (D-7) |
+| La Phase F constate que les runners GitHub sont éphémères et que son journal, écrit dans `RUNNER_TEMP`, disparaît : aucun anti-rejeu entre exécutions | Selon D-1, le serveur et son volume persistant sont l'emplacement retenu en conception pour l'état durable. SQLite est la cible conditionnelle de D-6 ; D-7 fixe une politique de sauvegarde, dont le fournisseur reste à choisir |
 | `approval_id` vaut `gh-<run_id>` et n'est vérifié par rien (Phase F §5) | L'identifiant d'approbation doit être choisi par le service, jamais par le run (exigence L5 de la Phase C) |
 | L'approbation d'un environnement GitHub porte sur un déploiement, pas sur l'empreinte du manifeste (Phase F §5) | L'assertion WebAuthn doit porter cryptographiquement sur l'énoncé qui contient `manifest_sha256` |
 | Le dépôt n'utilise que la bibliothèque standard | Elle ne fournit aucune API de vérification de signature RS256 (jeton OIDC) ou ECDSA/Ed25519 (WebAuthn). Il faudrait une dépendance tierce : c'est une décision du propriétaire (D-13). Une implémentation cryptographique maison est écartée |
@@ -118,20 +119,15 @@ Restaurer une sauvegarde prise à l'instant T **fait réapparaître comme non co
 - une approbation `APPROVED` ressuscitée est déjà bornée par son expiration (au plus 300 s après la signature, section 4.5), tant que l'horloge du serveur ne recule pas (limite A2-g) ;
 - le risque principal est la **perte d'un état `IN_FLIGHT`** ou `AMBIGUOUS` postérieur à T. Le service croirait qu'aucun envoi n'a eu lieu, et une nouvelle approbation du même manifeste pourrait conduire à une **double soumission**, donc à une double dépense, le jour où un Provider serait ouvert. Le rapprochement par lecture seule de l'historique du fournisseur n'est pas démontré : l'endpoint de statut REST et ses valeurs ne sont pas confirmés (Phase F §5).
 
-**Mesures à concevoir et à tester, aucune n'étant choisie (D-7) :**
+**Décision de conception conditionnelle D-7, sous délégation du propriétaire (2026-10-08) :**
 
-- **Témoin de restauration hors de l'ensemble sauvegardé.** Une époque de restauration et la dernière tête de journal connue ne peuvent pas vivre **uniquement** dans la base : restaurées avec elle, elles reviendraient à leur ancienne valeur. Elles doivent être conservées ailleurs, au minimum dans un fichier séparé exclu des sauvegardes de la base et, pour être utiles, dans une ancre externe. Au démarrage, le service refuse de servir si la base et le témoin divergent ;
-- **Interrupteur fermé d'office** dès qu'une divergence ou une restauration est constatée. La réouverture suit D-9 ;
-- **Rapprochement obligatoire** de tout état `IN_FLIGHT` ou `AMBIGUOUS` possiblement perdu, avant toute nouvelle demande. Faute d'un moyen de rapprochement démontré, le service reste fermé ;
-- **Ancre externe** de la tête du journal (option J-c de la Phase E).
+- **Sauvegardes** : une sauvegarde SQLite cohérente par jour, chiffrée avant de quitter le serveur, vers un stockage hors serveur et dans un compte et domaine de panne distincts. Conserver les 30 dernières sauvegardes quotidiennes. La clé privée de déchiffrement reste hors du serveur, sous contrôle de l'administrateur ; le serveur ne reçoit au plus que le matériel public nécessaire au chiffrement. La méthode et le fournisseur ne sont pas choisis (D-13, D-15), aucun coût n'est engagé, et le total récurrent TTC doit d'abord être vérifié par rapport à l'objectif budgétaire (section 8) ;
+- **Test de restauration** : un exercice mensuel dans un environnement isolé, sans réseau fournisseur et avec l'interrupteur fermé. Vérifier `integrity_check`, le traitement WAL, le journal et le comportement anti-rejeu. Ce test n'est pas encore réalisé ;
+- **Témoin local** : l'époque de restauration et la dernière tête connue sont conservées dans un fichier distinct de la base, exclu des sauvegardes. Il aide à détecter une restauration partielle, mais ne constitue pas la source d'autorité ;
+- **Ancre externe J-c** : enregistrer hors serveur, en ajout seul et dans un compte et domaine de panne distincts, le numéro séquentiel et l'empreinte de chaque nouvelle tête du journal, sans donnée métier, secret ou jeton. Le compte de service peut ajouter, pas remplacer ni supprimer les entrées. Au démarrage et avant de délivrer une autorisation, la base, le témoin local et l'ancre doivent concorder. Si l'ancre est indisponible, absente ou divergente, le service reste fermé ; aucun résultat n'est confirmé avant vérification de l'ancre ;
+- **Restauration** : toute restauration maintient l'interrupteur fermé jusqu'à vérification de l'ancre et rapprochement de l'état. Si une entrée `IN_FLIGHT` ou `AMBIGUOUS` a pu être perdue, aucune reprise n'est permise sans rapprochement fiable ; faute de preuve, le service reste fermé. Les modalités de réouverture relèvent de D-9.
 
-**Limites sans ancre externe :**
-
-- un témoin local reste supprimable par le compte (limite A2-e) ;
-- une restauration de l'**ensemble du volume** (par exemple par instantané de l'hébergeur) restaure aussi le témoin local, et n'est alors **pas détectée** ;
-- une restauration faite hors procédure, sans signalement, n'est détectée que par une ancre externe.
-
-Sans ancre externe, ces cas doivent être consignés comme **limites non détectées**, et non comme couverts.
+Avec cette conception, une restauration ancienne ou non annoncée doit diverger de l'ancre externe et provoquer un refus fermé. La résistance réelle de l'ancre dépendra toutefois du fournisseur, des droits et de l'immutabilité retenus ; ils restent à vérifier avant implémentation ou achat. Sans ancre opérationnelle, ces cas demeurent **non détectés** et le service ne peut pas être mis en service.
 
 ## 4. Architecture d'approbation proposée
 
@@ -290,7 +286,7 @@ Proposition, sous réserve de D-9.
 - **L'ajout seul est une convention**, renforcée si possible par des déclencheurs qui refusent `UPDATE` et `DELETE`. Elle n'est pas inviolable pour qui peut écrire le fichier ou administrer la base.
 - Un refus portant sur une demande authentifiée est journalisé au même titre qu'une approbation. Les requêtes **non authentifiées** (jeton invalide, assertion invalide) sont comptées ou agrégées de façon bornée, sans une entrée par requête, pour ne pas permettre de saturer le disque ou le journal.
 - Aucun secret, jeton OIDC, assertion brute, clé ni URL de résultat : seulement des identifiants, des empreintes, des décisions et des dates (exigence L6).
-- Ancre externe de la tête (J-c) : option ouverte (D-7). C'est la seule capable de détecter une réécriture complète ou une restauration non signalée (section 3.4).
+- Ancre externe de la tête (J-c) : principe retenu conditionnellement par D-7. C'est la seule capable de détecter une réécriture complète ou une restauration non signalée ; son fournisseur, ses droits append-only et sa disponibilité restent à démontrer (section 3.4).
 - Le journal trace ; il ne vaut jamais autorisation.
 
 ### 4.10 Point d'application : qui détient l'identifiant du fournisseur
@@ -462,8 +458,8 @@ Règles communes :
   - comparaison : aucun identifiant confirmé ne manque, aucune transaction partielle n'est visible, `integrity_check` est sain.
   - Limite : la durabilité du stockage hébergé côté hôte reste une hypothèse (section 3.3).
 - **X5. Restauration.**
-  - **annoncée** : sauvegarde, consommation, restauration ; l'approbation consommée n'est pas réutilisable, l'interrupteur est fermé, la divergence avec le témoin est signalée ;
-  - **non annoncée**, y compris par restauration du volume entier : résultat attendu selon l'option D-7 retenue. Sans ancre externe, la limite est consignée comme **non détectée** (section 3.4) ;
+  - **annoncée** : sauvegarde, consommation, restauration ; l'approbation consommée n'est pas réutilisable, l'interrupteur est fermé, et toute divergence base/témoin/ancre bloque le service ;
+  - **non annoncée**, y compris par restauration du volume entier : l'ancre externe indépendante doit détecter le recul et provoquer un refus fermé ; l'indisponibilité ou l'absence de l'ancre bloque aussi le service (section 3.4) ;
   - traitement des fichiers `-wal` et `-shm` vérifié.
 - **X6. Refus fermé.** Refus pour chacun des cas suivants : interrupteur absent ou corrompu ; version de schéma inattendue ; chaîne de journal rompue ; échec d'écriture du journal (aucune transition, la transaction étant atomique) ; `synchronous` relu différent de `FULL` ; base absente, corrompue ou en lecture seule ; disque plein ; verrou tenu au-delà du délai.
 - **X7. Horloge.** Le dernier instant observé est conservé. Tout recul de l'horloge est refusé, sans prolongation de fenêtre (A2-g). Si l'option est retenue, refus quand la synchronisation NTP n'est pas établie.
@@ -481,7 +477,7 @@ Règles communes :
 | D-4 | **Décidée par délégation le 2026-10-07 — plateforme et clé de sécurité, secours non synchronisable** | Passkeys de plateforme et clés de sécurité acceptées avec UV. Une passkey synchronisable (`BE=1`) peut être l'identifiant courant, pas l'identifiant de secours. Le secours doit être un identifiant distinct sur un authentificateur séparé avec `BE=0`, `BS=0`. `BE` est fixé à l'inscription et ne peut changer ; `BS=1` est refusé si `BE=0`, mais peut évoluer si `BE=1`. Aucune attestation AAGUID exigée ; le service fait confiance aux drapeaux signés et déclarés par l'authentificateur. Décision de conception seulement, sans inscription ni matériel acheté |
 | D-5 | **Décidée par délégation le 2026-10-07 — un approbateur, séparation obligatoire** | Une seule approbation WebAuthn suffit, sans quorum supplémentaire. L'approbateur autorisé doit être distinct de l'acteur GitHub qui lance le run ; auto-approbation refusée. Si cette séparation ne peut pas être vérifiée, refus fermé. L'identification des comptes et la protection des comptes relèvent aussi de D-15. Choix de conception seulement, sans implémentation |
 | D-6 | **Choix de conception conditionnel sous délégation le 2026-10-08 — S-1 SQLite** | SQLite est la cible de conception G2. Avant toute mise en service, réussir et consigner les preuves 2 et 3 de la section 3.3 ; si elles échouent, réexaminer S-2 ou S-3. Aucune base n'est créée ni déployée |
-| D-7 | Sauvegardes, rétention, témoin et ancre externe | Fréquence, emplacement hors du serveur, durée de conservation, chiffrement, exercice de restauration, emplacement du témoin de restauration, ancre J-c |
+| D-7 | **Choix de conception conditionnel sous délégation le 2026-10-08 — sauvegardes et ancre J-c** | Sauvegarde quotidienne chiffrée hors serveur, 30 jours de rétention, exercice mensuel de restauration isolé, témoin local hors sauvegarde et ancre externe append-only par tête de journal ; en cas d'indisponibilité ou de divergence, refus fermé. Le fournisseur, le compte, la méthode de chiffrement et le coût restent ouverts (D-13, D-15, section 8). Aucune sauvegarde ni aucun ancrage n'est configuré |
 | D-8 | Délais | Délai d'attente de l'humain (`approval_deadline`), fenêtre de validité (au plus 300 s), durée maximale du job en attente |
 | D-9 | Interrupteur et révocation | Qui ferme, qui rouvre, par quel geste et quel acte écrit ; authentification de la révocation ; révocation annulable ou non |
 | D-10 | Commits autorisés | Options (i), (ii) ou (iii) de la section 4.3 |
@@ -499,7 +495,7 @@ Règles communes :
 Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 
 1. **Revue de ce document G1** par le propriétaire, puis fusion éventuelle par PR.
-2. **Décisions écrites** D-7 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-6 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, de déployer ou d'ouvrir le Provider. Pour D-6, les preuves de durabilité et de restauration restent préalables à toute mise en service.
+2. **Décisions écrites** D-8 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-7 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6 et D-7, les preuves de durabilité, de chiffrement et de restauration ainsi que la vérification des coûts restent préalables à toute mise en service.
 3. **Vérifications documentaires** : offres, tarifs TTC et fonctions de console de Scaleway ; plan GitHub ; versions des paquets Ubuntu.
    - L'essai avec un **jeton OIDC réel** exige une **autorisation explicite et distincte du propriétaire**.
    - Il passerait par un workflow dédié qui n'affiche jamais le jeton brut, seulement des claims décodés non sensibles, et n'appelle aucun service.
