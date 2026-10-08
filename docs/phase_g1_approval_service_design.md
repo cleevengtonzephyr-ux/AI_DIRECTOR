@@ -38,7 +38,8 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Déclaré par le propriétaire, non vérifié par cette phase** | CI de la PR #6 verte : tests unitaires et audit `NO_DRIFT` | Instruction du propriétaire |
 | **Déclaré par le propriétaire, non vérifié par cette phase** | Configuration actuelle du serveur | Section 6 |
 | **Décision prise par le propriétaire** | D-1 : option E-2 (courtier) ; toute clé API dédiée à ce chemin serait détenue uniquement par le serveur, qui conserve l'état durable anti-rejeu sur son volume persistant. Choix de conception seulement : rien n'est implémenté et aucune clé n'a été créée | Instruction explicite du propriétaire, 2026-10-07 |
-| **Ouvert** | Moteur de stockage, sauvegardes, rétention, ancre externe | Section 3, décisions D-6 et D-7 |
+| **Décision de conception conditionnelle sous délégation explicite** | D-6 : SQLite retenu comme cible de conception pour G2, sous réserve des preuves de durabilité et de restauration ; aucune base n'est créée ni déployée | Section 3, décision D-6 |
+| **Ouvert** | Validation de SQLite avant tout usage serveur, sauvegardes, rétention et ancre externe | Sections 3.3 et 3.4, décisions D-6 et D-7 |
 | **Décision prise sous délégation explicite du propriétaire** | D-2 : WebAuthn est le seul facteur normal d'approbation ; la vérification locale de l'utilisateur est obligatoire ; l'inscription est réservée à une invitation à usage unique créée par SSH d'administration | Section 4.4, décision D-2 |
 | **Décision prise sous délégation explicite du propriétaire** | D-3 : deux identifiants WebAuthn distincts sur deux authentificateurs séparés ; fermeture immédiate et révocation en cas de perte ; remplacement seulement par la procédure SSH d'administration | Section 4.4, décision D-3 |
 | **Décision prise sous délégation explicite du propriétaire** | D-4 : passkeys de plateforme et clés de sécurité acceptées ; une passkey synchronisable peut servir d'identifiant courant, mais le secours doit être un identifiant distinct non synchronisable (`BE=0`) | Section 4.4, décision D-4 |
@@ -53,7 +54,7 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 
 | Constat | Conséquence pour G |
 |---|---|
-| La Phase F constate que les runners GitHub sont éphémères et que son journal, écrit dans `RUNNER_TEMP`, disparaît : aucun anti-rejeu entre exécutions | Selon D-1, le serveur et son volume persistant sont l'emplacement retenu en conception pour l'état durable. La base et les mécanismes restent à choisir (D-6 et D-7) |
+| La Phase F constate que les runners GitHub sont éphémères et que son journal, écrit dans `RUNNER_TEMP`, disparaît : aucun anti-rejeu entre exécutions | Selon D-1, le serveur et son volume persistant sont l'emplacement retenu en conception pour l'état durable. SQLite est la cible conditionnelle de D-6 ; les sauvegardes et mécanismes de restauration restent à décider (D-7) |
 | `approval_id` vaut `gh-<run_id>` et n'est vérifié par rien (Phase F §5) | L'identifiant d'approbation doit être choisi par le service, jamais par le run (exigence L5 de la Phase C) |
 | L'approbation d'un environnement GitHub porte sur un déploiement, pas sur l'empreinte du manifeste (Phase F §5) | L'assertion WebAuthn doit porter cryptographiquement sur l'énoncé qui contient `manifest_sha256` |
 | Le dépôt n'utilise que la bibliothèque standard | Elle ne fournit aucune API de vérification de signature RS256 (jeton OIDC) ou ECDSA/Ed25519 (WebAuthn). Il faudrait une dépendance tierce : c'est une décision du propriétaire (D-13). Une implémentation cryptographique maison est écartée |
@@ -76,7 +77,7 @@ Le stockage doit garantir, sur un serveur unique :
 
 ### 3.2 Comparaison des options
 
-Aucune option n'est choisie ici. Les versions disponibles sur Ubuntu 26.04.1 et les prix sont à vérifier.
+Les sorties de commandes en lecture seule, communiquées par le propriétaire le 2026-10-08, indiquent Python 3.14.4, SQLite 3.46.1 et `/dev/sdb` monté en ext4 avec `rw,relatime,stripe=1024`. `findmnt` n'affiche pas l'option `nobarrier`. Ces sorties ne démontrent ni la durabilité après coupure, ni la restauration, ni le comportement du stockage côté hôte.
 
 | Critère | **S-1. SQLite** sur le volume ext4 | **S-2. PostgreSQL local** | **S-3. Base managée** (par exemple PostgreSQL managé chez Scaleway) | **S-4. Fichiers JSON actuels** (`os.replace`) |
 |---|---|---|---|---|
@@ -90,20 +91,20 @@ Aucune option n'est choisie ici. Les versions disponibles sur Ubuntu 26.04.1 et 
 | Coût récurrent supplémentaire | Aucun pour le moteur ; stockage de sauvegarde à compter | Aucun pour le moteur ; stockage de sauvegarde à compter | **Abonnement supplémentaire**, à intégrer à l'objectif budgétaire de 50 € par mois TTC avant tout choix | Aucun |
 | Limites principales | Un seul écrivain ; pas d'accès depuis plusieurs machines | Surface et maintenance plus grandes pour un service à faible volume | Coût ; dépendance au réseau et au plan de contrôle de l'hébergeur ; un secret de base de données de plus | Pas de transaction ; ne répond pas aux besoins de la section 3.1 |
 
-### 3.3 Recommandation conditionnelle
+### 3.3 Choix de conception conditionnel (D-6)
 
-Elle ne vaut pas décision : le choix appartient au propriétaire (D-6).
+Sous la délégation explicite du propriétaire, **S-1 (SQLite) est retenu comme cible de conception pour G2**, car le service vise un seul serveur et un faible volume d'écritures ; Python fournit déjà le module `sqlite3`, sans serveur de base séparé, dépendance tierce ni abonnement supplémentaire. Ce choix ne vaut pas autorisation de créer une base, d'installer un logiciel, de déployer du code ou d'utiliser le service. Il ne devient définitif pour un usage serveur qu'après réussite et consignation des preuves ci-dessous. Si ces preuves échouent, D-6 devra être réexaminée avant toute suite.
 
-- **Si** le service reste sur un seul serveur, avec un faible volume d'écritures, un seul processus écrivain ou des écritures sérialisées par `BEGIN IMMEDIATE`, et que le propriétaire veut éviter toute dépendance et tout coût supplémentaire, **alors S-1 (SQLite)** paraît proportionné. Configuration à démontrer : `journal_mode=WAL` ; `synchronous=FULL` posé à chaque connexion puis **relu**, avec refus de servir si la valeur relue diffère ; `foreign_keys=ON` ; `busy_timeout` borné ; transactions explicites (attribut `autocommit` du module `sqlite3`, disponible depuis Python 3.12) ; fichier sous `/srv/ai-director-data` appartenant à `aidirector` et illisible par les autres comptes.
+- **Configuration SQLite à démontrer avant tout usage** : `journal_mode=WAL` ; `synchronous=FULL` posé à chaque connexion puis **relu**, avec refus de servir si la valeur relue diffère ; `foreign_keys=ON` ; `busy_timeout` borné ; transactions explicites (attribut `autocommit` du module `sqlite3`, disponible depuis Python 3.12) ; fichier sous `/srv/ai-director-data` appartenant à `aidirector` et illisible par les autres comptes.
 - **Si** plusieurs processus écrivains indépendants ou une évolution vers plusieurs machines sont prévus, **alors S-2** est plus adapté, au prix d'une dépendance tierce et d'une maintenance accrue.
 - **S-3** n'est envisageable que si son coût réel TTC, ajouté aux autres postes, reste dans l'objectif de 50 € par mois, preuve à l'appui (section 8).
 - **S-4** ne répond pas aux besoins transactionnels de la section 3.1.
 
-**Preuves nécessaires avant tout choix définitif :**
+**Preuves nécessaires avant toute décision définitive de mise en service :**
 
-1. Version de SQLite (ou de PostgreSQL) réellement fournie par Ubuntu 26.04.1, et version de Python disponible sur le serveur.
-2. Le volume ext4 est monté sans option désactivant les barrières d'écriture, et un arrêt brutal du processus puis du système invité ne perd aucune transaction confirmée (section 9, exigence X4).
-3. Sauvegarde puis restauration complètes, réalisées et consignées, y compris les scénarios de la section 3.4.
+1. **Reçue en sortie de session SSH le 2026-10-08** : Python 3.14.4, SQLite 3.46.1 ; `/dev/sdb`, ext4, options `rw,relatime,stripe=1024` (aucun `nobarrier` affiché). Cette preuve vient de la sortie fournie par le propriétaire et n'a pas été vérifiée indépendamment.
+2. Le volume ext4 est confirmé sans option désactivant les barrières d'écriture, et un arrêt brutal du processus puis du système invité ne perd aucune transaction confirmée (section 9, exigence X4). **Non démontré à ce stade.**
+3. Sauvegarde puis restauration complètes, réalisées et consignées, y compris les scénarios de la section 3.4. **Non démontré à ce stade.**
 4. Pour S-3 : devis ou tarif courant, montant TTC constaté, et mode de connexion (réseau privé ou point d'accès public avec TLS).
 
 **Limite non démontrable par ces essais :** une réinitialisation brutale de la machine virtuelle prouve la tenue après un crash du système invité. Elle ne prouve pas la tenue du stockage de l'hébergeur en cas de défaillance côté hôte (cache, alimentation, réplication). Cette durabilité reste une **hypothèse de confiance** envers Scaleway et ses engagements de service, à consigner comme telle.
@@ -479,7 +480,7 @@ Règles communes :
 | D-3 | **Décidée par délégation le 2026-10-07 — deux identifiants séparés, récupération SSH** | Deux identifiants WebAuthn distincts liés à deux authentificateurs séparés sont requis avant toute activation ; l'un est conservé comme secours. Une perte entraîne fermeture immédiate, révocation et journalisation. Le remplacement exige une invitation à usage unique créée depuis SSH ; si tous les identifiants sont perdus, les anciens sont tous révoqués et l'interrupteur reste fermé jusqu'à une réouverture conforme à D-9. Aucun repli par courriel, SMS, code de récupération ou support tiers. La racine SSH et la confiance dans le serveur restent des hypothèses de D-15. Les types acceptés sont fixés en D-4 |
 | D-4 | **Décidée par délégation le 2026-10-07 — plateforme et clé de sécurité, secours non synchronisable** | Passkeys de plateforme et clés de sécurité acceptées avec UV. Une passkey synchronisable (`BE=1`) peut être l'identifiant courant, pas l'identifiant de secours. Le secours doit être un identifiant distinct sur un authentificateur séparé avec `BE=0`, `BS=0`. `BE` est fixé à l'inscription et ne peut changer ; `BS=1` est refusé si `BE=0`, mais peut évoluer si `BE=1`. Aucune attestation AAGUID exigée ; le service fait confiance aux drapeaux signés et déclarés par l'authentificateur. Décision de conception seulement, sans inscription ni matériel acheté |
 | D-5 | **Décidée par délégation le 2026-10-07 — un approbateur, séparation obligatoire** | Une seule approbation WebAuthn suffit, sans quorum supplémentaire. L'approbateur autorisé doit être distinct de l'acteur GitHub qui lance le run ; auto-approbation refusée. Si cette séparation ne peut pas être vérifiée, refus fermé. L'identification des comptes et la protection des comptes relèvent aussi de D-15. Choix de conception seulement, sans implémentation |
-| D-6 | Base de données | S-1, S-2 ou S-3 (section 3), après les preuves de la section 3.3 |
+| D-6 | **Choix de conception conditionnel sous délégation le 2026-10-08 — S-1 SQLite** | SQLite est la cible de conception G2. Avant toute mise en service, réussir et consigner les preuves 2 et 3 de la section 3.3 ; si elles échouent, réexaminer S-2 ou S-3. Aucune base n'est créée ni déployée |
 | D-7 | Sauvegardes, rétention, témoin et ancre externe | Fréquence, emplacement hors du serveur, durée de conservation, chiffrement, exercice de restauration, emplacement du témoin de restauration, ancre J-c |
 | D-8 | Délais | Délai d'attente de l'humain (`approval_deadline`), fenêtre de validité (au plus 300 s), durée maximale du job en attente |
 | D-9 | Interrupteur et révocation | Qui ferme, qui rouvre, par quel geste et quel acte écrit ; authentification de la révocation ; révocation annulable ou non |
@@ -498,7 +499,7 @@ Règles communes :
 Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 
 1. **Revue de ce document G1** par le propriétaire, puis fusion éventuelle par PR.
-2. **Décisions écrites** D-6 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-5 sont décidées pour la conception ; elles ne constituent pas une autorisation d'implémenter ou d'ouvrir le Provider.
+2. **Décisions écrites** D-7 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-6 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, de déployer ou d'ouvrir le Provider. Pour D-6, les preuves de durabilité et de restauration restent préalables à toute mise en service.
 3. **Vérifications documentaires** : offres, tarifs TTC et fonctions de console de Scaleway ; plan GitHub ; versions des paquets Ubuntu.
    - L'essai avec un **jeton OIDC réel** exige une **autorisation explicite et distincte du propriétaire**.
    - Il passerait par un workflow dédié qui n'affiche jamais le jeton brut, seulement des claims décodés non sensibles, et n'appelle aucun service.
