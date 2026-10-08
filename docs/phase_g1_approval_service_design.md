@@ -2,7 +2,7 @@
 
 - **Date :** 2026-10-08
 - **Référence :** `main` à `f687973568d787e2b2e0051a4632cbbe962de94b` (fusion de la PR #6, Phase F)
-- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-9 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
+- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-10 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
 
 **NO-GO en vigueur. Provider = CLOSED.** La décision de [`phase_a_real_generation_decision.md`](phase_a_real_generation_decision.md) est inchangée. Ce document prolonge la conception de l'identité ([`phase_c_authorizer_identity_design.md`](phase_c_authorizer_identity_design.md)), celle des limites de l'autorisation, du plafond, de la révocation et de l'arrêt ([`phase_e_authorization_limits_ceiling_revocation_shutdown_design.md`](phase_e_authorization_limits_ceiling_revocation_shutdown_design.md)) et le chemin de production fermé ([`phase_f_production_path_design.md`](phase_f_production_path_design.md)). Il ne résout aucune des sept conditions de la Phase A. Aucun des quatre verrous d'exécution ni des verrous F-1 à F-4 n'est modifié.
 
@@ -47,6 +47,7 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Décision prise sous délégation explicite du propriétaire** | D-5 : une approbation WebAuthn par une personne autorisée distincte de l'acteur GitHub qui a lancé le run ; aucun auto-approuveur et aucun quorum supplémentaire | Section 4.4, décision D-5 |
 | **Décision prise sous délégation explicite du propriétaire** | D-8 : 10 minutes pour approuver depuis `requested_at`, validité de 300 secondes depuis `authorized_at`, et attente totale du job plafonnée à 15 minutes ; la première échéance atteinte bloque, sans prolongation ni réutilisation | Sections 4.5 et 10, décision D-8 |
 | **Décision prise sous délégation explicite du propriétaire** | D-9 : interrupteur fermé par défaut ; fermeture d'urgence depuis SSH sans WebAuthn ; réouverture manuelle depuis SSH avec confirmation WebAuthn fraîche et journalisation ; révocations définitives | Sections 4.8 et 10, décision D-9 |
+| **Décision prise sous délégation explicite du propriétaire** | D-10 : liste persistante de SHA complets autorisés explicitement par WebAuthn après fusion dans `main` ; tout SHA absent, différent ou révoqué est refusé | Sections 4.3 et 10, décision D-10 |
 | **Ouvert** | Forme de la réponse du service et sa vérification par le Director | Section 4.11, décision D-18 |
 | **Ouvert** | Réapprobation d'un même manifeste | Section 4.6, décision D-17 |
 | **Ouvert** | Exposition web : ports, TLS, reverse proxy | Section 7, décision D-12 |
@@ -187,13 +188,9 @@ D'où l'exigence de journaux sans jeton et d'actions épinglées.
 
 ### 4.3 Commits autorisés et contenu montré à l'approbateur
 
-Le service n'accepte qu'un `sha` explicitement autorisé. Options, sans choix (D-10) :
+**Décision D-10, sous délégation explicite du propriétaire : option (ii), liste explicite de commits.** Le service n'accepte qu'un SHA complet (40 caractères hexadécimaux) inscrit individuellement dans une liste persistante par une action humaine authentifiée par WebAuthn. L'inscription n'est permise qu'après la fusion du commit dans `main` et la réussite de ses contrôles CI ; l'action d'inscription lie le SHA exact à l'identité de l'approbateur et est journalisée. Le SHA présenté par le jeton OIDC du run doit être identique caractère pour caractère à une entrée active de cette liste. Un SHA abrégé, inconnu, différent ou révoqué, un nom de branche ou une étiquette ne constitue jamais une autorisation. Une révocation est définitive conformément à D-9 ; une nouvelle version nécessite une nouvelle inscription WebAuthn après fusion et contrôles.
 
-- (i) tout commit atteignable depuis `main`, protégé par les règles de branche du dépôt ;
-- (ii) liste explicite de commits, chacun inscrit par une action humaine authentifiée par WebAuthn sur le service ;
-- (iii) étiquettes signées. Leur vérification sur le serveur suppose un outil de vérification de signature, donc une dépendance (D-13).
-
-(ii) est la seule option qui lie l'inscription à la personne qui approuve ; (i) délègue cette confiance aux protections GitHub.
+La liste explicite lie l'autorisation à une action humaine et à un commit immuable. La condition de fusion dans `main` et de CI verte doit être vérifiée avant l'inscription ; la protection effective de `main` et la preuve de cette vérification restent liées aux décisions de sécurité GitHub de D-15. Cette décision ne choisit ni n'implémente le mécanisme de vérification GitHub du service.
 
 Le service ne peut pas recalculer lui-même le manifeste sans disposer des fichiers sources (prompt, avatar, référence visage). Options (D-11) :
 
@@ -443,7 +440,7 @@ Règles communes :
   - signature invalide ; `alg=none` ; confusion d'algorithme (algorithme symétrique utilisant la clé publique) ; `kid` inconnu ;
   - clés publiques de GitHub injoignables ; rotation des clés (nouvelle clé acceptée, clé retirée refusée) ;
   - `iss`, `aud` (dont l'audience de l'autre interface), `ref`, `repository_id`, `repository_owner_id`, `workflow_ref`, `job_workflow_ref`, `event_name` ou `runner_environment` erronés ;
-  - `sha` non autorisé ; `exp` dépassé ; `nbf` futur ; valeurs juste à l'intérieur et juste à l'extérieur de la tolérance d'horloge ;
+  - `sha` non autorisé, abrégé, révoqué ou différent de l'entrée WebAuthn autorisée ; un nom de branche ou une étiquette fourni à la place du SHA est refusé ; `exp` dépassé ; `nbf` futur ; valeurs juste à l'intérieur et juste à l'extérieur de la tolérance d'horloge ;
   - `run_attempt` égal à 2 ; même jeton présenté deux fois ; jeton du job `request` présenté au job `execute`.
 - **X2. WebAuthn.** Refus pour chacun des cas suivants :
   - origine ou `rpIdHash` erronés ; `type` différent de `webauthn.get` ; `crossOrigin` vrai ;
@@ -482,7 +479,7 @@ Règles communes :
 | D-7 | **Choix de conception conditionnel sous délégation le 2026-10-08 — sauvegardes et ancre J-c** | Sauvegarde quotidienne chiffrée hors serveur, 30 jours de rétention, exercice mensuel de restauration isolé, témoin local hors sauvegarde et ancre externe append-only par tête de journal ; en cas d'indisponibilité ou de divergence, refus fermé. Le fournisseur, le compte, la méthode de chiffrement et le coût restent ouverts (D-13, D-15, section 8). Aucune sauvegarde ni aucun ancrage n'est configuré |
 | D-8 | **Décidée par délégation le 2026-10-08 — délais** | Approbation dans les 10 minutes suivant `requested_at` ; assertion refusée à `approval_deadline` ou après. Autorisation valable 300 secondes depuis `authorized_at`, consommation refusée à l'échéance ou après. Attente totale du job limitée à 15 minutes depuis son démarrage ; la première échéance atteinte bloque. Aucun délai n'est prolongé ou remis à zéro et aucune approbation expirée n'est réutilisable ; nouvelle demande et nouvelle assertion requises. Décision de conception uniquement, sans implémentation |
 | D-9 | **Décidée par délégation le 2026-10-08 — interrupteur et révocation** | Fermé par défaut ; SSH d'administration suffit pour la fermeture d'urgence. Réouverture manuelle par SSH avec assertion WebAuthn fraîche, vérification locale et journalisation atomique, après rapprochement de la base, du journal, du témoin et de l'ancre ; sinon refus fermé. Les révocations de demandes, identifiants et commits sont définitives ; un nouvel identifiant nécessite une nouvelle invitation SSH. Aucun redémarrage ni restauration ne rouvre le service. Choix de conception seulement : Provider = CLOSED et NO-GO inchangés |
-| D-10 | Commits autorisés | Options (i), (ii) ou (iii) de la section 4.3 |
+| D-10 | **Décidée par délégation le 2026-10-08 — inscription explicite des commits** | Option (ii) : inscrire individuellement par WebAuthn le SHA complet d'un commit seulement après sa fusion dans `main` et la réussite de CI. À chaque demande, le SHA OIDC doit correspondre exactement à une entrée active. SHA abrégé, inconnu, différent ou révoqué refusé ; révocation définitive. Les protections de `main` et la manière de vérifier l'éligibilité restent à préciser avec D-15. Décision de conception seulement, sans implémentation |
 | D-11 | Manifeste et contenu montré | Option (a) ou (b) de la section 4.3 |
 | D-12 | Exposition web | Ports, TLS, reverse proxy, limitation de débit, sécurité de la page (section 7) |
 | D-13 | Dépendances | Abandon de la règle « bibliothèque standard uniquement » pour la vérification OIDC et WebAuthn (et R-1 ou (iii) le cas échéant) ; bibliothèques choisies, épinglage, mise à jour |
@@ -497,7 +494,7 @@ Règles communes :
 Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 
 1. **Revue de ce document G1** par le propriétaire, puis fusion éventuelle par PR.
-2. **Décisions écrites** D-10 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-9 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6 et D-7, les preuves de durabilité, de chiffrement et de restauration ainsi que la vérification des coûts restent préalables à toute mise en service.
+2. **Décisions écrites** D-11 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-10 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6 et D-7, les preuves de durabilité, de chiffrement et de restauration ainsi que la vérification des coûts restent préalables à toute mise en service.
 3. **Vérifications documentaires** : offres, tarifs TTC et fonctions de console de Scaleway ; plan GitHub ; versions des paquets Ubuntu.
    - L'essai avec un **jeton OIDC réel** exige une **autorisation explicite et distincte du propriétaire**.
    - Il passerait par un workflow dédié qui n'affiche jamais le jeton brut, seulement des claims décodés non sensibles, et n'appelle aucun service.
