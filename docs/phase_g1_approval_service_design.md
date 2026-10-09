@@ -30,7 +30,7 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Décision prise par le propriétaire** | Domaine stable **`zephyr-approval.fr`** | Instruction du propriétaire |
 | **Décision prise par le propriétaire** | **Objectif budgétaire maximal de 50 € par mois, taxes comprises**, pour l'ensemble des coûts récurrents. C'est un objectif : le coût réel TTC n'est ni constaté ni garanti (section 8) | Instruction du propriétaire |
 | **Décision prise par le propriétaire** | Le serveur est préparé, mais aucune application web n'y est déployée | Instruction du propriétaire |
-| **Vérifié dans le dépôt** | Phase F fusionnée : `main` = `origin/main` = `f687973` | Git local, après `git fetch` |
+| **Vérifié dans le dépôt** | La Phase F a été fusionnée dans `main` au commit historique `f687973` | Historique Git |
 | **Vérifié dans le dépôt** | Aucun code de **serveur** HTTP, ni OIDC, ni WebAuthn, ni base de données. Le seul code HTTP est le transport **client** fermé de la Phase F (`integrations/higgsfield/https_transport.py`, `import http.client`), câblé à rien | Recherche dans le code |
 | **Vérifié dans le dépôt** | Bibliothèque standard uniquement ; `cryptography`, `jwt` et `nacl` ne sont pas déclarés | README, Phase C §1 |
 | **Vérifié dans le dépôt** | Seule plateforme validée : CPython 3.14 sous Windows | `.python-version`, `tests/test_p3_106_python_version.py`, README |
