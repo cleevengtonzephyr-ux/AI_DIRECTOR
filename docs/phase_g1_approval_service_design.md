@@ -2,7 +2,7 @@
 
 - **Date :** 2026-10-08
 - **Référence :** `main` à `f687973568d787e2b2e0051a4632cbbe962de94b` (fusion de la PR #6, Phase F)
-- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-11 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
+- **Statut :** document de conception, corrigé après une revue de sécurité en lecture seule. D-1 reprend une instruction explicite du propriétaire ; D-2 à D-12 sont choisies sous sa délégation explicite des 2026-10-07 et 2026-10-08. Les autres décisions ouvertes restent à trancher. Ce document n'implémente rien, n'autorise rien et ne déploie rien.
 
 **NO-GO en vigueur. Provider = CLOSED.** La décision de [`phase_a_real_generation_decision.md`](phase_a_real_generation_decision.md) est inchangée. Ce document prolonge la conception de l'identité ([`phase_c_authorizer_identity_design.md`](phase_c_authorizer_identity_design.md)), celle des limites de l'autorisation, du plafond, de la révocation et de l'arrêt ([`phase_e_authorization_limits_ceiling_revocation_shutdown_design.md`](phase_e_authorization_limits_ceiling_revocation_shutdown_design.md)) et le chemin de production fermé ([`phase_f_production_path_design.md`](phase_f_production_path_design.md)). Il ne résout aucune des sept conditions de la Phase A. Aucun des quatre verrous d'exécution ni des verrous F-1 à F-4 n'est modifié.
 
@@ -49,9 +49,9 @@ Le service ne décide jamais d'ouvrir le Provider. Tant que la décision de la P
 | **Décision prise sous délégation explicite du propriétaire** | D-9 : interrupteur fermé par défaut ; fermeture d'urgence depuis SSH sans WebAuthn ; réouverture manuelle depuis SSH avec confirmation WebAuthn fraîche et journalisation ; révocations définitives | Sections 4.8 et 10, décision D-9 |
 | **Décision prise sous délégation explicite du propriétaire** | D-10 : liste persistante de SHA complets autorisés explicitement par WebAuthn après fusion dans `main` ; tout SHA absent, différent ou révoqué est refusé | Sections 4.3 et 10, décision D-10 |
 | **Décision prise sous délégation explicite du propriétaire** | D-11 : copie figée des seuls assets verrouillés de Video 005 ; le service recalcule le manifeste et montre le contenu réel à l'approbateur | Sections 4.3 et 10, décision D-11 |
+| **Décision prise sous délégation explicite du propriétaire** | D-12 : Caddy en reverse proxy HTTPS ; ports publics 80/443, backend limité à localhost, SSH sur 22 ; interfaces WebAuthn et OIDC séparées ; aucune exposition avant autorisation distincte | Sections 7 et 10, décision D-12 |
 | **Ouvert** | Forme de la réponse du service et sa vérification par le Director | Section 4.11, décision D-18 |
 | **Ouvert** | Réapprobation d'un même manifeste | Section 4.6, décision D-17 |
-| **Ouvert** | Exposition web : ports, TLS, reverse proxy | Section 7, décision D-12 |
 | **Ouvert** | Plafonds de dépense (aucun montant) | Décision D-14 |
 | **Ouvert** | Coût mensuel total réel, TTC | Section 8 |
 
@@ -373,24 +373,16 @@ Non connu à ce jour, à constater plus tard :
 - politique de sauvegarde ou d'instantanés de l'hébergeur ;
 - fonctions d'accès console et de mode secours de l'offre Scaleway.
 
-## 7. Exposition web (non effectuée)
+## 7. Exposition web (D-12 décidée ; non effectuée)
 
-WebAuthn impose HTTPS, et le run GitHub doit pouvoir joindre le service depuis Internet. Les adresses des runners hébergés couvrent de larges plages : un filtrage par adresse n'est pas une protection réaliste pour l'interface OIDC. Décisions ouvertes (D-12) :
+**Décision D-12, sous délégation explicite du propriétaire.** Si une exposition est autorisée dans une étape ultérieure, Caddy sert de reverse proxy et termine TLS pour `zephyr-approval.fr`. Le service applicatif écoute seulement sur loopback ou socket Unix ; aucun port applicatif ou d'administration n'est directement exposé. La documentation officielle de Caddy décrit l'HTTPS automatique et demande une accessibilité publique sur 80/443 pour la configuration standard ([HTTPS quick-start](https://caddyserver.com/docs/quick-starts/https), [reverse proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)).
 
-- ouverture du port 443. Le port 80 n'est nécessaire que pour un défi ACME HTTP-01 ; les défis DNS-01 et TLS-ALPN-01 n'en ont pas besoin ;
-- terminaison TLS : reverse proxy (dépendance système) ou serveur Python ;
-- limitation de débit, taille maximale des requêtes, interface d'administration non exposée (SSH seulement) ;
-- séparation éventuelle de l'interface humaine et de l'interface OIDC.
+- **Ports entrants prévus, conditionnels à une autorisation distincte avant tout changement serveur** : TCP 22 pour SSH d'administration ; TCP 80 pour le défi ACME et redirection vers HTTPS uniquement ; TCP 443 pour l'interface. Le port 80 ne sert aucune page ni donnée sensible. Aucun autre port entrant n'est autorisé. La politique SSH reste clé uniquement ; la restriction de son adresse source dépend de la vérification d'une adresse d'administration stable (D-15). Cette décision ne change aucune règle UFW existante.
+- **Séparation des interfaces** : interface humaine sur `zephyr-approval.fr` ; API des jobs sur `api.zephyr-approval.fr`, avec audiences OIDC distinctes. L'API n'utilise ni ne reçoit de cookie de session WebAuthn. Le sous-domaine API n'est publié qu'après vérification DNS et du pare-feu IPv4/IPv6 ; aucun enregistrement AAAA n'est publié tant que le filtrage IPv6 n'est pas vérifié.
+- **Limites applicatives** : limitation de débit bornée, tailles et délais de requête bornés, endpoints d'administration accessibles par SSH uniquement. La protection ne dépend pas d'un filtrage par IP des runners GitHub, dont les plages sont trop larges.
+- **Sécurité de la page WebAuthn** : CSP stricte, aucune ressource ni aucun script tiers, protection CSRF, sessions courtes liées à la demande avec cookies `Secure`, `HttpOnly` et `SameSite`, échappement des données de l'énoncé ; HSTS uniquement après vérification complète de HTTPS. Le proxy administratif de Caddy reste accessible en local seulement.
 
-**Sécurité de la page d'approbation**, exigences à valider. Un script injecté dans l'origine `https://zephyr-approval.fr` pourrait mener une cérémonie WebAuthn devant un affichage falsifié. D'où :
-- une politique de sécurité du contenu (CSP) stricte ;
-- aucun script ni ressource tierce ;
-- HSTS ;
-- une protection contre la falsification de requêtes (CSRF) ;
-- des sessions courtes, liées à la demande, invalidées après usage ;
-- aucune donnée de l'énoncé injectée sans échappement.
-
-Rien n'est ouvert par cette phase.
+**Limite de cette décision :** elle fixe une cible de conception, pas un déploiement. Aucun logiciel n'est installé, aucun port n'est ouvert, aucun DNS n'est modifié et aucune application n'est exposée par cette phase. Avant tout changement, il faudra une autorisation distincte, la vérification de la configuration DNS, du pare-feu et de TLS, puis une revue de sécurité de l'interface.
 
 ## 8. Budget
 
@@ -461,7 +453,8 @@ Règles communes :
 - **X7. Horloge et échéances.** Le dernier instant observé est conservé. Tout recul de l'horloge est refusé, sans prolongation de fenêtre (A2-g). Tester les bornes `now < approval_deadline`/`now >= approval_deadline` et `now < authorized_at + 300 s`/`now >= authorized_at + 300 s` ; assertion tardive, consommation expirée et plafond total du job atteint doivent tous être refusés. Vérifier qu'aucune reconnexion, interrogation répétée ou relance ne réinitialise les délais. Si l'option est retenue, refus quand la synchronisation NTP n'est pas établie.
 - **X8. Secrets et droits.**
   - des valeurs sentinelles (jeton, assertion, secret) sont injectées puis recherchées dans tous les journaux du service et du système : aucune occurrence ;
-  - base, témoin et journal ne sont lisibles que par `aidirector`.
+  - base, témoin et journal ne sont lisibles que par `aidirector` ;
+  - **D-12** : backend non joignable directement depuis Internet ; HTTP ne sert que le défi ACME/la redirection sans donnée sensible ; UI et API ont des audiences OIDC distinctes et aucune session WebAuthn n'est transmise à l'API ; politique CSP, CSRF et cookies de session sont vérifiés ; aucune entrée DNS IPv6 avant contrôle du pare-feu IPv6.
 
 ## 10. Décisions qui restent au propriétaire
 
@@ -478,7 +471,7 @@ Règles communes :
 | D-9 | **Décidée par délégation le 2026-10-08 — interrupteur et révocation** | Fermé par défaut ; SSH d'administration suffit pour la fermeture d'urgence. Réouverture manuelle par SSH avec assertion WebAuthn fraîche, vérification locale et journalisation atomique, après rapprochement de la base, du journal, du témoin et de l'ancre ; sinon refus fermé. Les révocations de demandes, identifiants et commits sont définitives ; un nouvel identifiant nécessite une nouvelle invitation SSH. Aucun redémarrage ni restauration ne rouvre le service. Choix de conception seulement : Provider = CLOSED et NO-GO inchangés |
 | D-10 | **Décidée par délégation le 2026-10-08 — inscription explicite des commits** | Option (ii) : inscrire individuellement par WebAuthn le SHA complet d'un commit seulement après sa fusion dans `main` et la réussite de CI. À chaque demande, le SHA OIDC doit correspondre exactement à une entrée active. SHA abrégé, inconnu, différent ou révoqué refusé ; révocation définitive. Les protections de `main` et la manière de vérifier l'éligibilité restent à préciser avec D-15. Décision de conception seulement, sans implémentation |
 | D-11 | **Décidée par délégation le 2026-10-08 — recomposition et présentation du manifeste** | Option (b) : copie figée limitée aux assets verrouillés de Video 005 ; recalcul du manifeste côté service et comparaison exacte avec le manifeste du run ; affichage du prompt, des paramètres et des médias réels avant approbation. Aucun asset arbitraire accepté. Accès, chiffrement, sauvegarde, rétention et suppression doivent être démontrés avant mise en service. Aucun fichier n'est copié ou déployé à cette étape |
-| D-12 | Exposition web | Ports, TLS, reverse proxy, limitation de débit, sécurité de la page (section 7) |
+| D-12 | **Décidée par délégation le 2026-10-08 — exposition web conditionnelle** | Caddy reverse proxy avec HTTPS automatique ; TCP 80 limité à ACME/redirection, TCP 443 pour l'interface, TCP 22 pour SSH d'administration ; application sur loopback/socket Unix ; UI `zephyr-approval.fr` séparée de l'API OIDC `api.zephyr-approval.fr` et audiences distinctes. Limites de débit/taille/délai, CSP, absence de ressources tierces, CSRF, sessions sécurisées ; pas d'AAAA avant validation IPv6. Rien n'est ouvert ou installé : exposition et changement UFW nécessiteront une autorisation distincte et une revue de sécurité |
 | D-13 | Dépendances | Abandon de la règle « bibliothèque standard uniquement » pour la vérification OIDC et WebAuthn (et R-1 ou (iii) le cas échéant) ; bibliothèques choisies, épinglage, mise à jour |
 | D-14 | Plafonds de dépense | Montant par requête et existence d'un plafond par période (condition 3). **Aucun montant n'est fixé par ce document** |
 | D-15 | Protection des comptes Scaleway, GitHub, DNS et Higgsfield | Authentification forte, accès console, clés d'API, alertes de facturation, verrou du domaine chez le registrar, règles de protection de `main` et de l'environnement, inventaire et révocation des accès fournisseur indépendants (section 4.10) |
@@ -491,7 +484,7 @@ Règles communes :
 Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 
 1. **Revue de ce document G1** par le propriétaire, puis fusion éventuelle par PR.
-2. **Décisions écrites** D-12 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-11 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de déployer ou d'ouvrir le Provider. Pour D-6, D-7 et D-11, les preuves de durabilité, de chiffrement, de sauvegarde, de restauration, de rétention et de suppression ainsi que la vérification des coûts restent préalables à toute mise en service.
+2. **Décisions écrites** D-13 à D-18, ou décision explicite de reporter celles qui ne bloquent pas la suite. D-1 à D-12 fixent des choix de conception ; ils ne constituent pas une autorisation d'implémenter, d'acheter un stockage, de modifier UFW/DNS, d'exposer l'interface, de déployer ou d'ouvrir le Provider. Pour D-6, D-7 et D-11, les preuves de durabilité, de chiffrement, de sauvegarde, de restauration, de rétention et de suppression ainsi que la vérification des coûts restent préalables à toute mise en service.
 3. **Vérifications documentaires** : offres, tarifs TTC et fonctions de console de Scaleway ; plan GitHub ; versions des paquets Ubuntu.
    - L'essai avec un **jeton OIDC réel** exige une **autorisation explicite et distincte du propriétaire**.
    - Il passerait par un workflow dédié qui n'affiche jamais le jeton brut, seulement des claims décodés non sensibles, et n'appelle aucun service.
@@ -503,7 +496,7 @@ Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 5. **Campagne Linux** de la section 9 (V-1 à V-3, X1 à X8), avec procès-verbal consigné. Déployer du code, même de test, sur le serveur exige une **autorisation explicite et distincte du propriétaire**, sans ouverture de port.
 6. **Revue de sécurité** du code (`/security-review` et relecture humaine) et **revue du modèle de menace** serveur : comptes, droits, journaux système, mises à jour, racines de confiance de la section 5.
 7. **Exercice de sauvegarde et de restauration** de bout en bout, consigné, y compris les scénarios de la section 3.4.
-8. **Décision d'exposition web** (D-12), puis ouverture des seuls ports retenus, et contrôle externe de la configuration TLS et de la sécurité de la page.
+8. **Exposition web** : elle exige une **autorisation explicite et distincte du propriétaire** avant tout changement UFW, DNS, installation ou déploiement. Après les prérequis D-12, seuls les ports retenus sont ouverts, puis la configuration TLS et la sécurité de la page sont contrôlées depuis l'extérieur.
 9. **Essai de bout en bout, Provider = CLOSED**, sur autorisation explicite du propriétaire :
    - run réel sur `main`, demande, approbation WebAuthn, consommation unique, puis arrêt attendu sur le code 4 ;
    - rejeu, relance, expiration, révocation et réapprobation (selon D-17) testés et refusés ;
@@ -516,7 +509,7 @@ Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 - Aucune modification de code, de workflow, de test, de verrou, de configuration serveur, de réglage GitHub ou de DNS.
 - Aucun secret ni aucune clé créé ou lu ; aucun logiciel installé ; aucun port ouvert ; aucun déploiement.
 - Aucun appel à Higgsfield ; aucun workflow lancé ; aucun appel à `create_job()`.
-- Aucune option choisie à la place du propriétaire ; aucun montant de plafond fixé ; aucun essai de la section 9 exécuté.
+- Aucune option choisie sans instruction ou délégation explicite du propriétaire ; aucun montant de plafond fixé ; aucun essai de la section 9 exécuté.
 - Les conditions 1, 3, 5 et 7 de la Phase A restent **ouvertes**, la condition 2 reste **partiellement traitée**, et le **NO-GO** reste en vigueur.
 
 **Provider = CLOSED · Real generation = 0 · Credits = 0**
