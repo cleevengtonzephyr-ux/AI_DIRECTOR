@@ -533,11 +533,16 @@ Chaque étape est une condition de la suivante. Aucune n'ouvre le Provider.
 11. Seule une **nouvelle décision écrite**, distincte de celle de la Phase A, pourrait ensuite constater que les sept conditions sont remplies. Ce document ne la prépare pas et ne la promet pas.
 
 ## 12. Ce que cette phase ne fait pas
+- Dans le périmètre initial de cette phase, aucune modification du code, des workflows, des tests, du verrou applicatif, de la configuration serveur, des réglages GitHub ou du DNS n’était prévue. Un audit ultérieur a activé la règle GitHub « Protect main » ; voir l’addendum ci-dessous.
+### Addendum — Protection GitHub de main (10 octobre 2026)
+Le ruleset « Protect main » est actif et cible uniquement la branche `main`. La liste d’exceptions est vide.
 
-- Aucune modification de code, de workflow, de test, de verrou, de configuration serveur, de réglage GitHub ou de DNS.
-- Aucun secret ni aucune clé créé ou lu ; aucun logiciel installé ; aucun port ouvert ; aucun déploiement.
+Les fusions dans `main` exigent une pull request et la réussite du contrôle GitHub Actions `tests`. Les suppressions et les force pushes sont bloqués. Aucune approbation humaine n’est exigée ; la mise à jour de la branche avec la dernière version de `main` n’est pas obligatoire.
+
+Ce changement concerne les réglages GitHub. Aucun code, workflow, test, secret ou appel au fournisseur n’a été modifié ou lancé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+- Aucun secret ni aucune clé créée ou lue ; aucun logiciel installé ; aucun nouveau port ouvert ; SSH 22/tcp reste autorisé et à l’écoute ; aucun déploiement.
 - Aucun appel à Higgsfield ; aucun workflow lancé ; aucun appel à `create_job()`.
 - Aucune option choisie sans instruction ou délégation explicite du propriétaire ; aucun montant de plafond fixé ; aucun essai de la section 9 exécuté.
 - Les conditions 1, 3, 5 et 7 de la Phase A restent **ouvertes**, la condition 2 reste **partiellement traitée**, et le **NO-GO** reste en vigueur.
 
-**Provider = CLOSED · Real generation = 0 · Credits = 0**
+**Provider = CLOSED · Real generation = 0 · API balance = UNKNOWN**
