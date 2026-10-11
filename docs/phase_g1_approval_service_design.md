@@ -546,3 +546,10 @@ Ce changement concerne les réglages GitHub. Aucun code, workflow, test, secret 
 - Les conditions 1, 3, 5 et 7 de la Phase A restent **ouvertes**, la condition 2 reste **partiellement traitée**, et le **NO-GO** reste en vigueur.
 
 **Provider = CLOSED · Real generation = 0 · API balance = UNKNOWN**
+
+
+### GitHub Actions — Permissions (10 octobre 2026)
+
+État vérifié : toutes les Actions et tous les workflows réutilisables sont autorisés. L’obligation d’épingler les Actions sur un SHA complet est désactivée.
+
+Les workflows examinés utilisent `actions/checkout` et `actions/setup-python`, épinglées sur des SHA complets. La restriction de la liste des Actions autorisées n’a pas été appliquée et reste à décider.
