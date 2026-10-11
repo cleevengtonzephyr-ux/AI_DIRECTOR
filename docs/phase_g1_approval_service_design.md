@@ -6,7 +6,7 @@
 
 **NO-GO en vigueur. Provider = CLOSED.** La décision de [`phase_a_real_generation_decision.md`](phase_a_real_generation_decision.md) est inchangée. Ce document prolonge la conception de l'identité ([`phase_c_authorizer_identity_design.md`](phase_c_authorizer_identity_design.md)), celle des limites de l'autorisation, du plafond, de la révocation et de l'arrêt ([`phase_e_authorization_limits_ceiling_revocation_shutdown_design.md`](phase_e_authorization_limits_ceiling_revocation_shutdown_design.md)) et le chemin de production fermé ([`phase_f_production_path_design.md`](phase_f_production_path_design.md)). Il ne résout aucune des sept conditions de la Phase A. Aucun des quatre verrous d'exécution ni des verrous F-1 à F-4 n'est modifié.
 
-Pendant cette phase : aucun code, workflow, test, verrou, paramètre serveur, réglage GitHub ou enregistrement DNS n'a été modifié ; aucun secret ni aucune clé n'a été créé ou lu ; aucun logiciel n'a été installé ; aucun port n'a été ouvert ; rien n'a été déployé ; Higgsfield n'a pas été contacté ; aucun workflow n'a été lancé.
+Pendant cette phase : aucun code, workflow, test, verrou, paramètre serveur, réglage GitHub ou enregistrement DNS n'a été modifié ; aucun secret ni aucune clé n'a été créé ou lu ; aucun logiciel n'a été installé ; aucun port n'a été ouvert ; rien n'a été déployé ; Higgsfield n'a pas été contacté ; aucun workflow n'a été lancé manuellement ; les contrôles GitHub Actions déclenchés automatiquement par les pull requests documentaires ont été exécutés et ont réussi.
 
 ## 1. Rôle prévu du serveur
 
@@ -539,9 +539,9 @@ Le ruleset « Protect main » est actif et cible uniquement la branche `main`. L
 
 Les fusions dans `main` exigent une pull request et la réussite du contrôle GitHub Actions `tests`. Les suppressions et les force pushes sont bloqués. Aucune approbation humaine n’est exigée ; la mise à jour de la branche avec la dernière version de `main` n’est pas obligatoire.
 
-Ce changement concerne les réglages GitHub. Aucun code, workflow, test, secret ou appel au fournisseur n’a été modifié ou lancé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+Ce changement concerne les réglages GitHub. Aucun code, workflow ou test n’a été modifié ; aucun secret n’a été créé ou lu ; aucun appel au fournisseur n’a été lancé. Le contrôle GitHub Actions `tests`, déclenché automatiquement pour la pull request documentaire, a réussi. `Provider = CLOSED` et `NO-GO` restent en vigueur.
 - Aucun secret ni aucune clé créée ou lue ; aucun logiciel installé ; aucun nouveau port ouvert ; SSH 22/tcp reste autorisé et à l’écoute ; aucun déploiement.
-- Aucun appel à Higgsfield ; aucun workflow lancé ; aucun appel à `create_job()`.
+- Aucun appel à Higgsfield ; aucun workflow lancé manuellement ; le contrôle GitHub Actions déclenché automatiquement par la pull request documentaire a réussi ; aucun appel à `create_job()`.
 - Aucune option choisie sans instruction ou délégation explicite du propriétaire ; aucun montant de plafond fixé ; aucun essai de la section 9 exécuté.
 - Les conditions 1, 3, 5 et 7 de la Phase A restent **ouvertes**, la condition 2 reste **partiellement traitée**, et le **NO-GO** reste en vigueur.
 
@@ -554,4 +554,4 @@ La politique GitHub Actions est restreinte à « cleevengtonzephyr-ux » et aux 
 
 Les seules Actions externes inscrites dans la liste sont `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1` et `actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97`. L’obligation d’épingler les Actions sur un SHA complet est activée. Les workflows examinés utilisent ces deux Actions, épinglées sur ces SHA.
 
-Ce changement concerne les réglages GitHub Actions. Aucun code, workflow, test, secret ou appel au fournisseur n’a été modifié ou lancé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+Ce changement concerne les réglages GitHub Actions. Aucun code, workflow ou test n’a été modifié ; aucun secret n’a été créé ou lu ; aucun appel au fournisseur n’a été lancé. Le contrôle GitHub Actions `tests`, déclenché automatiquement pour la PR #29, a réussi. `Provider = CLOSED` et `NO-GO` restent en vigueur.
