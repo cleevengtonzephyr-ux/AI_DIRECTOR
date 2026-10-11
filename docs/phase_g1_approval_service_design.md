@@ -548,8 +548,10 @@ Ce changement concerne les réglages GitHub. Aucun code, workflow, test, secret 
 **Provider = CLOSED · Real generation = 0 · API balance = UNKNOWN**
 
 
-### GitHub Actions — Permissions (10 octobre 2026)
+### GitHub Actions — Permissions (11 octobre 2026)
 
-État vérifié : toutes les Actions et tous les workflows réutilisables sont autorisés. L’obligation d’épingler les Actions sur un SHA complet est désactivée.
+La politique GitHub Actions est restreinte à « cleevengtonzephyr-ux » et aux Actions externes explicitement autorisées. Les Actions créées par GitHub et celles de créateurs vérifiés du Marketplace ne sont pas autorisées globalement.
 
-Les workflows examinés utilisent `actions/checkout` et `actions/setup-python`, épinglées sur des SHA complets. La restriction de la liste des Actions autorisées n’a pas été appliquée et reste à décider.
+Les seules Actions externes inscrites dans la liste sont `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1` et `actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97`. L’obligation d’épingler les Actions sur un SHA complet est activée. Les workflows examinés utilisent ces deux Actions, épinglées sur ces SHA.
+
+Ce changement concerne les réglages GitHub Actions. Aucun code, workflow, test, secret ou appel au fournisseur n’a été modifié ou lancé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
