@@ -555,3 +555,26 @@ La politique GitHub Actions est restreinte à « cleevengtonzephyr-ux » et aux 
 Les seules Actions externes inscrites dans la liste sont `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1` et `actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97`. L’obligation d’épingler les Actions sur un SHA complet est activée. Les workflows examinés utilisent ces deux Actions, épinglées sur ces SHA.
 
 Ce changement concerne les réglages GitHub Actions. Aucun code, workflow ou test n’a été modifié ; aucun secret n’a été créé ou lu ; aucun appel au fournisseur n’a été lancé. Le contrôle GitHub Actions `tests`, déclenché automatiquement pour la PR #29, a réussi. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+### Vérification de la facturation Scaleway (12 octobre 2026)
+
+La liste des factures passées affiche une facture d’octobre 2026, type « Purchase », statut « Paid », total final de 5,98 € TTC (TVA : 0 %). Cost Manager affiche séparément 13,44 € HT de consommation courante. Ces chiffres ne sont pas réconciliés comme un total unique ; vérifier la facture de consommation après la clôture d’octobre.
+
+### Audit des accès Scaleway, DNS et Higgsfield (14 octobre 2026)
+
+Constats consignés à partir des captures fournies par le propriétaire et des commandes de lecture seule qu’il a exécutées. Les éléments qui ne sont pas confirmés ci-dessous restent ouverts.
+
+**Scaleway, IAM et serveur**
+- L’organisation montre un membre actif, propriétaire, avec MFA configurée sur son compte. L’application indique cependant que l’obligation MFA à l’échelle de l’organisation n’est pas appliquée. Aucune clé API Scaleway n’est affichée. L’organisation comporte 5 groupes et 3 politiques ; leurs permissions globales n’ont pas toutes été examinées.
+- Le domaine `zephyr-approval.fr` est actif, verrouillé contre le transfert et le renouvellement automatique est activé ; l’expiration affichée est le 5 octobre 2027. Le propriétaire confirme que les contacts sont accessibles et à jour. DNSSEC est désactivé. La zone comporte deux NS et un enregistrement A vers `78.232.45.139`, adresse que le propriétaire confirme comme celle de l’instance AI_DIRECTOR.
+- L’instance est affichée « Running », avec facturation active, en zone PAR1. Le groupe de sécurité affiche les politiques par défaut entrantes et sortantes sur Accept et aucune règle personnalisée entrante ou sortante ; des règles fixes bloquent toutefois SMTP sortant.
+- Sur Ubuntu, UFW est actif, journalisation faible, politique entrante `deny` et sortante `allow`. La seule règle entrante affichée est SSH 22/tcp depuis toutes les adresses, en IPv4 et IPv6. La configuration SSH effective interdit root et l’authentification par mot de passe, et autorise les clés publiques. La liste des sockets montre SSH 22 comme seul port TCP écoutant sur toutes les interfaces ; aucun service Web n’écoute actuellement sur 80 ou 443.
+- L’administration se fait depuis un partage de connexion mobile Wizzee. Le caractère fixe ou changeant de l’adresse publique n’est pas connu ; aucune restriction SSH par adresse source n’a donc été vérifiée ou configurée. Le filtrage cloud par groupe de sécurité ne limite pas actuellement les connexions entrantes.
+- Le tableau de facturation montre un champ de budget mensuel sans montant et une alerte par courriel à 90 %. Cette alerte est une notification, pas une limite de dépense. Les 5,98 € TTC de la facture d’octobre et les 13,44 € HT affichés par Cost Manager restent à rapprocher après clôture de la période.
+
+**Higgsfield**
+- Selon les captures et les vérifications rapportées par le propriétaire, la console API n’affiche aucune clé, le solde API est nul et Analytics affiche 0 requête sur les 30 derniers jours.
+- Sur le compte Web, la capture « 7 derniers jours » affiche 0 coût, 0 crédit dépensé et 0 génération totale ; le rechargement automatique est désactivé. Elle montre aussi trois lignes « Mode Auto Libre », « Épuisé », chacune à 0 crédit, datées du 10 octobre 2026 vers 07 h 03–07 h 04. Le propriétaire ne reconnaît pas ces événements. Ces écrans ne montrent aucune génération achevée ni dépense de crédits, mais ne permettent pas d’identifier qui a déclenché les événements ni d’exclure un accès non autorisé.
+- Le propriétaire confirme le 14 octobre 2026 avoir effectué la démarche recommandée : changer le mot de passe (ou sécuriser le compte du fournisseur de connexion, selon la méthode utilisée) et contacter Higgsfield pour fermer les sessions actives. La fermeture effective n’a pas été vérifiée indépendamment. La procédure officielle Higgsfield décrit cette récupération ([source](https://higgsfield.ai/creator-hub/help-center/account/how-do-i-recover-access-to-my-account)). Les intégrations/connecteurs autorisés et les autres voies d’accès pouvant lancer une génération restent à inventorier. Les trois événements inexpliqués empêchent de considérer l’inventaire comme terminé.
+
+Aucun secret ni aucune clé n’a été lu ou copié dans le dépôt ; aucune clé, aucun réglage de compte, aucune règle réseau ou DNS n’a été modifié ; aucun appel API ou génération Higgsfield n’a été lancé. Ces contrôles documentaires ne lèvent pas le NO-GO : `Provider = CLOSED`, plafond de dépense Higgsfield non fixé et génération réelle toujours non autorisée.
