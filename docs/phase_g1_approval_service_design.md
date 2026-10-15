@@ -565,12 +565,15 @@ La liste des factures passées affiche une facture d’octobre 2026, type « Pur
 Constats consignés à partir des captures fournies par le propriétaire et des commandes de lecture seule qu’il a exécutées. Les éléments qui ne sont pas confirmés ci-dessous restent ouverts.
 
 **Scaleway, IAM et serveur**
-- L’organisation montre un membre actif, propriétaire, avec MFA configurée sur son compte. L’application indique cependant que l’obligation MFA à l’échelle de l’organisation n’est pas appliquée. Aucune clé API Scaleway n’est affichée. L’organisation comporte 5 groupes et 3 politiques ; leurs permissions globales n’ont pas toutes été examinées.
+- L’organisation montre un membre actif, propriétaire, avec MFA configurée sur son compte. L’application indique cependant que l’obligation MFA à l’échelle de l’organisation n’est pas appliquée. Aucune clé API Scaleway n’est affichée. L’organisation comporte 5 groupes et 3 politiques ; les trois politiques de groupes personnalisés sont décrites dans le complément IAM ci-dessous. Les droits directs et la vue exhaustive des permissions effectives restent à confirmer.
 - Le domaine `zephyr-approval.fr` est actif, verrouillé contre le transfert et le renouvellement automatique est activé ; l’expiration affichée est le 5 octobre 2027. Le propriétaire confirme que les contacts sont accessibles et à jour. DNSSEC est désactivé. La zone comporte deux NS et un enregistrement A vers `78.232.45.139`, adresse que le propriétaire confirme comme celle de l’instance AI_DIRECTOR.
 - L’instance est affichée « Running », avec facturation active, en zone PAR1. Le groupe de sécurité affiche les politiques par défaut entrantes et sortantes sur Accept et aucune règle personnalisée entrante ou sortante ; des règles fixes bloquent toutefois SMTP sortant.
 - Sur Ubuntu, UFW est actif, journalisation faible, politique entrante `deny` et sortante `allow`. La seule règle entrante affichée est SSH 22/tcp depuis toutes les adresses, en IPv4 et IPv6. La configuration SSH effective interdit root et l’authentification par mot de passe, et autorise les clés publiques. La liste des sockets montre SSH 22 comme seul port TCP écoutant sur toutes les interfaces ; aucun service Web n’écoute actuellement sur 80 ou 443.
 - L’administration se fait depuis un partage de connexion mobile Wizzee. Le caractère fixe ou changeant de l’adresse publique n’est pas connu ; aucune restriction SSH par adresse source n’a donc été vérifiée ou configurée. Le filtrage cloud par groupe de sécurité ne limite pas actuellement les connexions entrantes.
 - Le tableau de facturation montre un champ de budget mensuel sans montant et une alerte par courriel à 90 %. Cette alerte est une notification, pas une limite de dépense. Les 5,98 € TTC de la facture d’octobre et les 13,44 € HT affichés par Cost Manager restent à rapprocher après clôture de la période.
+
+**GitHub**
+- Le propriétaire confirme le 15 octobre 2026 que la double authentification et les moyens de récupération de son compte GitHub sont activés et à jour. Cette confirmation n’a pas été vérifiée indépendamment ; aucun code de récupération ni secret n’a été demandé ou communiqué.
 
 **Higgsfield**
 - Selon les captures et les vérifications rapportées par le propriétaire, la console API n’affiche aucune clé, le solde API est nul et Analytics affiche 0 requête sur les 30 derniers jours.
