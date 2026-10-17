@@ -983,8 +983,32 @@ class TestPinnedActions(unittest.TestCase):
         ci = parse_workflow_yaml(CI_WORKFLOW.read_text(encoding="utf-8"))
         self.assertEqual(ci["on"], {"push": {"branches": ["main"]}, "pull_request": {"branches": ["main"]}, "workflow_dispatch": None})
         self.assertEqual(ci["permissions"], {"contents": "read"})
-        runs = [step.get("run") for step in ci["jobs"]["tests"]["steps"] if "run" in step]
-        self.assertEqual(runs, ["python -m unittest discover -s tests -t . -v", "python scripts/architecture_audit.py"])
+        steps = [step for step in ci["jobs"]["tests"]["steps"] if "run" in step]
+        runs = [step["run"] for step in steps]
+        self.assertEqual(len(runs), 4)
+        self.assertEqual(runs[0], "python -m pip install --disable-pip-version-check uv==0.13.1")
+        # Dépendances verrouillées : export de uv.lock avec empreintes, puis
+        # installation vérifiée dans l'interpréteur système de setup-python.
+        self.assertEqual(steps[1].get("shell"), "pwsh")
+        install = runs[1].splitlines()
+        self.assertEqual(len(install), 4)
+        self.assertEqual(
+            install[0],
+            'uv export --locked --no-dev --no-emit-project --project approval_service '
+            '--format requirements.txt --output-file "$env:RUNNER_TEMP/approval-requirements.txt"',
+        )
+        self.assertEqual(install[1], "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }")
+        self.assertEqual(
+            install[2],
+            'python -m pip install --disable-pip-version-check --require-hashes --no-deps '
+            '-r "$env:RUNNER_TEMP/approval-requirements.txt"',
+        )
+        self.assertEqual(install[3], "exit $LASTEXITCODE")
+        # Les tests tournent avec le Python système, jamais via `uv run` (venv).
+        self.assertEqual(runs[2:], ["python -m unittest discover -s tests -t . -v", "python scripts/architecture_audit.py"])
+        for run in runs:
+            self.assertNotIn("uv run", run)
+            self.assertNotIn("uv sync", run)
         for path, value in _walk(ci):
             self.assertNotRegex(value, r"(?i)\bsecrets\b", path)
 

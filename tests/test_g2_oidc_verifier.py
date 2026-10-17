@@ -190,7 +190,15 @@ class OidcVerifierTests(unittest.TestCase):
             verifier.verify(self._token())
 
     def test_actor_and_token_id_remain_optional_until_claim_contract_is_confirmed(self):
-        identity = self.verifier.verify(self._token(self._claims(actor=None, jti=None)))
+        claims = self._claims()
+        del claims["actor"]
+        del claims["jti"]
+        token = self._token(claims)
+        decoded = jwt.decode(token, options={"verify_signature": False})
+        self.assertNotIn("actor", decoded)
+        self.assertNotIn("jti", decoded)
+
+        identity = self.verifier.verify(token)
 
         self.assertIsNone(identity.actor)
         self.assertIsNone(identity.token_id)
