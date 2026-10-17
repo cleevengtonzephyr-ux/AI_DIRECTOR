@@ -666,3 +666,14 @@ Suite à la pré-vérification, création d’un manifeste séparé pour les dé
 - **Limite et suite bloquante.** Aucune distribution Linux/WSL n’est disponible sur le poste. Bien que le verrou contienne des artefacts Linux compatibles déclarés, l’installation effective sous CPython 3.14.4 Ubuntu reste à réaliser avant de considérer la précondition G2 complète. Le verrou est donc un candidat documenté, pas une autorisation de commencer l’implémentation G2. Aucun paquet n’a été installé sur le serveur ; aucun réseau applicatif, secret réel, asset réel, appel fournisseur ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
 
 Sources consultées le 16 octobre 2026 : [PyJWT 2.15.1 sur PyPI — licence et empreinte publiée](https://pypi.org/project/PyJWT/2.15.1/), [source PyJWT 2.15.1](https://github.com/jpadilla/pyjwt/blob/2.15.1/jwt/api_jwt.py), [avis GHSA-gvp8-978c-rx2q](https://github.com/jpadilla/pyjwt/security/advisories/GHSA-gvp8-978c-rx2q), [changelog PyJWT 2.14.0](https://github.com/jpadilla/pyjwt/blob/2.14.0/CHANGELOG.rst), [fido2 2.2.1 sur PyPI](https://pypi.org/project/fido2/2.2.1/), [cryptography 50.0.2 sur PyPI](https://pypi.org/project/cryptography/50.0.2/), [cffi sur PyPI](https://pypi.org/project/cffi/), [pycparser sur PyPI](https://pypi.org/project/pycparser/), [avis cryptography](https://github.com/pyca/cryptography/security/advisories).
+
+### G2 — validation du verrou sur Ubuntu via CI (17 octobre 2026)
+
+Le poste de développement ne dispose pas d’une distribution WSL ni de Docker/Podman ; l’installation effective sur Ubuntu ne peut donc pas être réalisée localement. Pour ne pas prétendre qu’une compatibilité Linux est prouvée par la seule résolution universelle du verrou, le workflow CI ajoute un contrôle d’installation isolé ciblant Ubuntu 24.04 avec CPython 3.14.4, ainsi que Windows 2025 avec CPython 3.14.5.
+
+- Le job installe uniquement les dépendances verrouillées du sous-projet `approval_service` avec `uv sync --locked --no-dev`. Il n’exécute pas le service, n’utilise aucun secret, n’appelle aucun fournisseur et ne déploie rien.
+- La version de uv utilisée pour ce contrôle est fixée à 0.13.1. Les actions de checkout et de configuration Python réutilisent les révisions déjà épinglées par la CI.
+- **Résultat en attente.** Ce contrôle n’a pas été exécuté par Codex ; il devra réussir dans GitHub Actions sur la PR avant que la précondition d’installation Windows/Linux soit déclarée satisfaite. Aucun test n’a été ajouté ou lancé localement dans cette étape.
+- Le job ne change ni le périmètre d’exécution G2, ni les verrous de production : `Provider = CLOSED` et `NO-GO` restent en vigueur. L’implémentation mock-only demeure en attente de ce résultat.
+
+Référence d’action : [documentation officielle de setup-python](https://github.com/actions/setup-python/blob/main/docs/advanced-usage.md).
