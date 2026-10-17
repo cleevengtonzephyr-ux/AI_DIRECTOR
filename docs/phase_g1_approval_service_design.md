@@ -635,3 +635,9 @@ Constats issus de deux courriels du support Higgsfield transmis par le propriét
 - **Conséquence pour l’audit.** Les trois entrées ne témoignent pas d’une dépense de crédits ni d’une génération média selon le support. L’attribution personnelle des messages et l’inventaire complet des voies d’accès restent à établir ; la réponse technique par entrée est encore attendue.
 
 Aucun appel API, message Supercomputer, génération, téléversement ou déploiement Higgsfield n’a été lancé par Codex pour cette vérification. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+### Confirmation des sessions de console Scaleway (16 octobre 2026)
+
+La capture de l’onglet des identifiants du compte Owner affiche cinq sessions de console, toutes indiquées comme Chrome sur Windows 10 : une datée du 5 octobre 2026 et quatre du 16 octobre 2026. Le propriétaire confirme le 16 octobre reconnaître les cinq sessions comme les siennes. Les adresses IP ne sont pas reproduites. Aucune session n’a été révoquée ou modifiée pendant cette vérification.
+
+Cette confirmation est une déclaration du propriétaire à partir des informations affichées ; elle ne constitue pas une vérification technique indépendante de l’appareil ou des adresses IP. Elle concerne les sessions Scaleway et ne change pas l’analyse distincte des accès Higgsfield. Aucun identifiant, paramètre de compte ou secret n’a été consulté ou modifié. `Provider = CLOSED` et `NO-GO` restent en vigueur.
