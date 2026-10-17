@@ -1,0 +1,12 @@
+[project]
+name = "ai-director-approval-service"
+version = "0.1.0"
+description = "Isolated dependencies for the mock-only approval service"
+requires-python = ">=3.14.4,<3.15"
+dependencies = [
+    "fido2==2.2.1",
+    "PyJWT[crypto]==2.15.1",
+]
+
+[tool.uv]
+package = false
