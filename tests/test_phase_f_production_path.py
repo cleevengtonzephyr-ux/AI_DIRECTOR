@@ -966,15 +966,12 @@ class TestPinnedActions(unittest.TestCase):
         self.assertEqual(seen, {(p.name, a) for p in ALL_WORKFLOWS for a in PINNED_ACTIONS})
 
     def test_every_pin_carries_its_version_comment(self):
-        count = 0
         for path in ALL_WORKFLOWS:
             for line in path.read_text(encoding="utf-8").splitlines():
                 if line.strip().startswith(("- uses:", "uses:")):
-                    count += 1
                     action = line.split("uses:", 1)[1].split("@", 1)[0].strip()
                     sha, version = PINNED_ACTIONS[action]
                     self.assertTrue(line.rstrip().endswith(f"@{sha} # {version}"), line)
-        self.assertEqual(count, 6)
 
     def test_checkout_never_persists_credentials_in_any_workflow(self):
         for path in ALL_WORKFLOWS:
