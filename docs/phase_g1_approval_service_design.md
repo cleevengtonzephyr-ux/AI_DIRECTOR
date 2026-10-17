@@ -673,7 +673,14 @@ Le poste de développement ne dispose pas d’une distribution WSL ni de Docker/
 
 - Le job installe uniquement les dépendances verrouillées du sous-projet `approval_service` avec `uv sync --locked --no-dev`. Il n’exécute pas le service, n’utilise aucun secret, n’appelle aucun fournisseur et ne déploie rien.
 - La version de uv utilisée pour ce contrôle est fixée à 0.13.1. Les actions de checkout et de configuration Python réutilisent les révisions déjà épinglées par la CI.
-- **Résultat en attente.** Ce contrôle n’a pas été exécuté par Codex ; il devra réussir dans GitHub Actions sur la PR avant que la précondition d’installation Windows/Linux soit déclarée satisfaite. Aucun test n’a été ajouté ou lancé localement dans cette étape.
-- Le job ne change ni le périmètre d’exécution G2, ni les verrous de production : `Provider = CLOSED` et `NO-GO` restent en vigueur. L’implémentation mock-only demeure en attente de ce résultat.
+- **Résultat obtenu sur la PR #41 fusionnée.** GitHub Actions a validé l’installation verrouillée sur Windows 2025 / CPython 3.14.5 et Ubuntu 24.04 / CPython 3.14.4. Après correction du test de pins d’actions (compteur fixe de 6 devenu inutile après l’ajout du job matriciel), la suite complète et l’audit d’architecture ont également réussi ; la PR affiche trois contrôles réussis. Cela satisfait le prérequis d’installation reproductible pour commencer l’implémentation G2 mock-only, sans constituer une preuve de disponibilité ou de durabilité sur le serveur.
+- Le job ne change ni le périmètre d’exécution G2, ni les verrous de production : `Provider = CLOSED` et `NO-GO` restent en vigueur. L’implémentation G2 est commencée dans l’addendum ci-dessous.
 
 Référence d’action : [documentation officielle de setup-python](https://github.com/actions/setup-python/blob/main/docs/advanced-usage.md).
+
+### G2 — première primitive d’énoncé canonique (17 octobre 2026)
+
+Début de l’implémentation mock-only dans `approval_service/approval_service/canonical_json.py` : sérialisation JSON compacte à clés triées, encodée en UTF-8, et calcul SHA-256 en hexadécimal minuscule. Les floats, clés non textuelles, types Python non JSON et chaînes non encodables en UTF-8 sont refusés pour éviter une empreinte ambiguë entre runtimes. Cette primitive ne définit pas encore le schéma métier de l’énoncé et n’effectue aucune vérification OIDC/WebAuthn.
+
+- Sept tests locaux couvrent la stabilité d’ordre, les octets UTF-8, l’absence de mutation et les refus de types ambigus ; ils réussissent. `git diff --check` et l’audit `python scripts/architecture_audit.py` réussissent (`NO_DRIFT`).
+- Aucun serveur HTTP, stockage, appel réseau, secret, asset réel, fournisseur ou génération n’est utilisé. La suite G2 reste incomplète ; `Provider = CLOSED` et `NO-GO` restent en vigueur.
