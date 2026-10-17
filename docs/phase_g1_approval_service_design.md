@@ -684,3 +684,11 @@ Début de l’implémentation mock-only dans `approval_service/approval_service/
 
 - Sept tests locaux couvrent la stabilité d’ordre, les octets UTF-8, l’absence de mutation et les refus de types ambigus ; ils réussissent. `git diff --check` et l’audit `python scripts/architecture_audit.py` réussissent (`NO_DRIFT`).
 - Aucun serveur HTTP, stockage, appel réseau, secret, asset réel, fournisseur ou génération n’est utilisé. La suite G2 reste incomplète ; `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+### G2 — schéma versionné de l’énoncé d’approbation (17 octobre 2026)
+
+Ajout d’un modèle immuable et strict (`approval_service/approval_service/approval_statement.py`) aligné sur les champs de la section 4.5. Le modèle lie le RP, l’approbateur pseudonyme et la méthode WebAuthn, les identifiants stables du dépôt/run/workflow, le SHA complet, les empreintes du manifeste et des médias, les paramètres vidéo et les identifiants générés par le service. Les horodatages sont des entiers Unix en millisecondes ; `approval_deadline` doit valoir `requested_at + 600 s`, et la validité de l’autorisation ne dépasse pas 300 s. Cette unité est une convention de représentation de l’implémentation, sans modifier les délais D-8.
+
+- Le nonce est vérifié comme 256 bits en hexadécimal minuscule et distinct des trois identifiants de service. L’empreinte de l’énoncé utilise les octets canoniques ; le défi WebAuthn est une empreinte SHA-256 de ces octets, du nonce brut et d’un préfixe de séparation de domaine.
+- `max_cost_credits_per_request` reste obligatoirement `null` conformément à D-14. Ce modèle ne prend aucune décision et n’autorise aucune génération ; la demande demeure bloquante tant qu’un plafond n’est pas défini séparément.
+- Huit tests sur le schéma et le défi, ainsi que les sept tests JSON canoniques, réussissent localement. Aucun vrai jeton OIDC, identifiant WebAuthn, secret, réseau, stockage, asset ou fournisseur n’est utilisé. Vérificateurs, registre transactionnel et serveur restent à implémenter ; `Provider = CLOSED` et `NO-GO` restent en vigueur.
