@@ -762,3 +762,64 @@ Chaque refus est identifié par son propre message : un test ne réussit pas par
 - Comme les tests OIDC, ce module n’est exécuté en CI que sous Windows. Le job Ubuntu se limite à l’installation verrouillée et aux tests de réservation ; la validation Linux complète exigée par D-16 reste ouverte.
 
 Aucun serveur HTTP, stockage durable, récupération JWKS, jeton OIDC réel, réseau applicatif, secret, compte Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+### G2 — registre durable des approbations WebAuthn (18 octobre 2026)
+
+Ajout de `approval_service/approval_service/approval_store.py`, un registre SQLite de la bibliothèque standard. Aucune dépendance n’est ajoutée : `pyproject.toml` et `uv.lock` sont inchangés. Le registre expose seulement `initialize`, `create_request`, `approve`, `expire_request` et `revoke_credential`. Il ne consomme aucune approbation, n’est pas relié au Gate, n’inscrit aucun identifiant et n’appelle aucun fournisseur.
+
+- **Initialisation et ouverture.** `initialize()` crée un fichier neuf (création exclusive, mode 0600), le passe en WAL et pose le schéma version 1 (`application_id`, `user_version`). Les tables sont STRICT : métadonnées (dernier instant observé), identifiants, demandes et journal. Un fichier existant est refusé. Chaque opération ouvre sa propre connexion en `mode=rw`, qui ne crée jamais de fichier. Elle refuse auparavant un chemin relatif, une base absente, un lien symbolique, un fichier non régulier et, sous POSIX, un fichier, un `-wal`, un `-shm` ou un répertoire qui ne sont pas privés au compte (aucun droit pour le groupe ni les autres). Elle vérifie ensuite `application_id`, `user_version`, `journal_mode=wal`, `synchronous=FULL` et `foreign_keys=ON` (posés puis relus), le délai d’attente, l’absence de violation de clé étrangère et l’égalité exacte des tables, index et déclencheurs avec le schéma version 1. SQLite 3.37 au moins est exigé pour les tables STRICT.
+- **`SQLITE_BUSY`.** Le délai d’attente est borné : 5 secondes par défaut, réglable au-dessus de 0 et jusqu’à 30 secondes. Toute écriture commence par `BEGIN IMMEDIATE` : un concurrent attend le détenteur au lieu d’échouer sur un instantané périmé. Au-delà du délai, `ApprovalStoreBusyError` est levée sans aucune modification. Un `COMMIT` en échec est signalé comme une issue à relire avant tout nouvel essai.
+- **Demande et énoncé.** `create_request()` enregistre un seul énoncé immuable par demande, sous forme d’octets canoniques avec leur empreinte. `approval_id`, `request_id`, `authorization_id`, le nonce et le couple (`run_id`, `run_attempt`) sont uniques. Aucune réémission n’est possible, et un énoncé déjà expiré est refusé.
+- **Approbation.** Dans une transaction `BEGIN IMMEDIATE`, `approve()` relit l’énoncé stocké, le reconstruit et vérifie ses octets canoniques, son empreinte et les colonnes associées. Elle contrôle ensuite l’état `PENDING`, l’échéance E = min(`approval_deadline`, `expires_at`) et l’horloge, puis l’assertion avec le vérificateur WebAuthn existant. Celui-ci lit les identifiants dans la même transaction et exige un identifiant actif de l’approbateur attendu. En cas de succès, la même transaction écrit l’état `APPROVED`, le compteur, BS, le dernier instant observé et l’entrée de journal. Toute erreur annule l’ensemble.
+- **Expiration.** Dès l’instant E, aucune approbation n’est possible. L’état `EXPIRED` est écrit dans une transaction distincte, validée après le rollback de l’approbation, et jamais annulée par lui. Si cette écriture échoue, le refus demeure : la demande reste `PENDING` en base, mais ne peut toujours pas être approuvée. `expire_request()` fait la même transition sur demande et ne touche pas aux demandes `APPROVED`.
+- **Compteurs.** La valeur 0 suivie de 0 est acceptée. Si l’une des deux valeurs est non nulle et que la nouvelle est inférieure ou égale à l’ancienne, l’approbation est refusée et la demande reste `PENDING`. C’est un signal, pas une preuve de clonage : une réinitialisation, un défaut de l’authentificateur ou une assertion plus ancienne validée après une plus récente produisent le même écart. L’ordre retenu est celui des validations. Le signal est consigné au plus une fois par couple demande/identifiant, dans une transaction distincte, avec l’empreinte SHA-256 de l’identifiant et les deux valeurs, sans assertion. Il n’entraîne ni révocation ni fermeture automatique.
+- **BE/BS et révocation.** BE est immuable ; BS suit la dernière assertion acceptée. `revoke_credential()` est définitive et fait passer dans la même transaction les demandes encore `APPROVED` par cet identifiant à `REVOKED`. Un recul d’horloge ne bloque pas une révocation, qui enregistre alors le dernier instant observé.
+- **Horloge.** Le dernier instant observé est conservé. Un recul est refusé sans écriture, y compris pendant la vérification de l’assertion.
+- **Protections du schéma.** Des déclencheurs refusent les transitions non prévues, toute suppression, la modification de l’énoncé, de l’identité d’un identifiant ou de BE, le recul ou la répétition d’un compteur non nul, la réactivation d’un identifiant et toute réécriture du journal. Ce sont des conventions renforcées : un processus qui peut écrire le fichier peut les contourner (§4.9).
+- **Identifiants de test.** Aucune méthode, commande ni voie d’inscription n’existe. Les tests insèrent leurs identifiants synthétiques directement dans leurs bases temporaires.
+- **D-5 non résolu.** Aucun acteur GitHub n’est enregistré ni vérifié. Un état `APPROVED` n’autorise rien, et aucune future consommation n’est autorisée tant que D-5 n’est pas résolu par un contrat d’identité confirmé.
+
+**Ce que prouvent les tests.** `tests/test_g2_approval_store.py` comprend 46 tests. Les clés P-256 sont générées localement et les assertions construites avec les classes de `fido2`.
+
+- **Approbation et rejeu :** approbation nominale ; rejeu de la même assertion refusé, même avec un compteur à 0 ; assertion d’une autre demande ; signature invalide ; identifiants d’approbation inconnus ou mal formés ; doublons d’énoncé.
+- **Intégrité de l’énoncé :** énoncé altéré, empreinte altérée, colonne divergente, contenu non JSON. Une réécriture cohérente de l’énoncé, empreinte comprise, ne permet pas de réutiliser l’assertion signée.
+- **Compteurs :** 0 suivi de 0, progression, valeurs égales, inférieures ou nulles, assertion arrivée dans le désordre puis nouvelle assertion acceptée, signal unique par demande et identifiant.
+- **Expiration :** échéance de l’énoncé et échéance d’approbation ; expiration détectée par le vérificateur puis validée séparément ; échec de l’écriture d’expiration ; `expire_request()`.
+- **Révocation et transitions :** révocation définitive avec cascade ; quinze transitions ou modifications refusées par le schéma.
+- **Horloge :** recul avant et pendant la vérification ; horloges invalides.
+- **Ouverture :** base absente (jamais recréée), fichier existant, chemin relatif, lien symbolique, permissions POSIX, identifiant d’application, version, mode de journal, objets du schéma, fichier non SQLite, violation de clé étrangère, version de SQLite.
+- **Échecs SQLite :** `SQLITE_BUSY` borné sans modification ; échec du journal qui annule toute l’approbation ; base en lecture seule.
+- **Contention :** quatre processus et huit threads, avec une seule approbation retenue. Avec les threads, chaque perdant reçoit le refus « non `PENDING` ».
+- **Arrêt brutal :** processus tué avant le `COMMIT` (la demande reste `PENDING`, `integrity_check` est sain et l’approbation reste possible) ou après (l’approbation est conservée et le rejeu refusé).
+- **Périmètre :** seules les cinq opérations sont publiques ; le module ne contient aucune insertion d’identifiant ; le schéma ne contient aucun acteur ; le journal ne contient ni identifiant brut ni élément d’assertion.
+
+Vingt-deux mutations temporaires ont neutralisé tour à tour chacune de ces règles. Vingt et une ont fait échouer le module dès le premier essai. La vingt-deuxième remplaçait `BEGIN IMMEDIATE` par un `BEGIN` différé ; le test des threads exige depuis que chaque perdant reçoive le refus « non `PENDING` », et cette mutation échoue désormais à chaque essai (trois sur trois). Le fichier a été restauré à l’identique, octet pour octet.
+
+**CI.** Un nouveau job `posix-approval-store` s’exécute sur Ubuntu 24.04 avec CPython 3.14.4, les actions épinglées et `persist-credentials: false`. Il installe uv 0.13.1, exporte le verrou par `uv export --locked`, installe les dépendances par `pip install --require-hashes --no-deps` dans le Python système, puis lance `python -m unittest tests.test_g2_approval_store -v`. Les jobs `posix-execution-claim` et `tests` sont inchangés. `tests/test_phase_f_production_path.py` vérifie la structure exacte de ce job et la liste des jobs. Les deux tests propres à POSIX (lien symbolique et permissions) ne s’exécutent que dans ce job.
+
+**Vérifications exécutées.** Elles ont été lancées avec le CPython 3.14.5 Windows du poste, avec les dépendances verrouillées installées dans un dossier temporaire hors du dépôt.
+
+- Registre : 46 tests réussis, dont deux ignorés sous Windows (lien symbolique sans privilège, permissions POSIX).
+- Avec les autres modules G2 et les tests de structure CI : 158 tests réussis.
+- Suite complète (`python -m unittest discover -s tests -t .`) : 3 088 tests réussis, dont deux ignorés (les deux tests propres à POSIX).
+- Audit d’architecture : `NO_DRIFT`.
+- `git diff --check` : propre.
+
+Le job Ubuntu n’a pas pu être exécuté localement, faute de WSL et de Docker : son résultat sur GitHub Actions fera foi.
+
+**Limites restantes.**
+
+- **Durabilité :** `synchronous=FULL` ne couvre pas le stockage de l’hébergeur. Aucune coupure de machine n’a été testée (X4). La synchronisation du répertoire à la création reste à vérifier sous Linux (V-3).
+- **Restauration :** sans ancre externe J-c, une restauration ancienne n’est pas détectée (§3.4).
+- **Fichier :**
+  - système de fichiers local uniquement ; NFS, SMB et dossiers synchronisés ne sont ni pris en charge ni détectés ;
+  - la base, son `-wal` et son `-shm` ne doivent jamais être ouverts, copiés ou supprimés hors de `sqlite3` pendant le fonctionnement ;
+  - un remplacement du fichier entre le contrôle du lien symbolique et l’ouverture par SQLite n’est pas couvert ;
+  - les permissions Windows ne sont pas contrôlées ;
+  - le chemin de production `/srv/ai-director-data` n’est pas créé.
+- **Schéma :** aucune migration n’existe et toute autre version est refusée. Une future version exigera une étape explicite, précédée d’une sauvegarde.
+- **Journal :** il n’est ni chaîné ni ancré. Seuls l’expiration et le signal de compteur sont consignés parmi les refus.
+- **Hors périmètre :** consommation `APPROVED → CONSUMED`, interrupteur D-9, emplacement D-17, reçu D-18, intégration au Gate, inscription réelle (D-2, D-3) et serveur HTTP.
+- **D-5 :** non résolu, comme indiqué plus haut.
+
+Aucun secret, authentificateur réel, jeton, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
