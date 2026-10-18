@@ -76,6 +76,7 @@ class OidcVerifierTests(unittest.TestCase):
             "run_id": "1234567890",
             "run_attempt": 1,
             "actor": "synthetic-actor",
+            "actor_id": "12",
             "jti": "synthetic-token-id",
         }
         claims.update(overrides)
@@ -95,6 +96,7 @@ class OidcVerifierTests(unittest.TestCase):
         self.assertEqual(identity.run_id, "1234567890")
         self.assertEqual(identity.run_attempt, 1)
         self.assertEqual(identity.actor, "synthetic-actor")
+        self.assertEqual(identity.actor_id, "12")
         self.assertEqual(identity.token_id, "synthetic-token-id")
 
     def test_issuer_and_allowed_signing_algorithm_are_fixed(self):
@@ -192,16 +194,86 @@ class OidcVerifierTests(unittest.TestCase):
     def test_actor_and_token_id_remain_optional_until_claim_contract_is_confirmed(self):
         claims = self._claims()
         del claims["actor"]
+        del claims["actor_id"]
         del claims["jti"]
         token = self._token(claims)
         decoded = jwt.decode(token, options={"verify_signature": False})
         self.assertNotIn("actor", decoded)
+        self.assertNotIn("actor_id", decoded)
         self.assertNotIn("jti", decoded)
 
         identity = self.verifier.verify(token)
 
         self.assertIsNone(identity.actor)
+        self.assertIsNone(identity.actor_id)
         self.assertIsNone(identity.token_id)
+
+    def test_actor_id_is_kept_as_a_decimal_string(self):
+        for actor_id in ("1", "12", "9876543210", "123456789012345678901234567890"):
+            with self.subTest(actor_id=actor_id):
+                identity = self.verifier.verify(self._token(self._claims(actor_id=actor_id)))
+                self.assertEqual(identity.actor_id, actor_id)
+
+    def test_absent_actor_id_stays_none_without_affecting_the_run_identity(self):
+        claims = self._claims()
+        del claims["actor_id"]
+
+        identity = self.verifier.verify(self._token(claims))
+
+        self.assertIsNone(identity.actor_id)
+        self.assertEqual(identity.actor, "synthetic-actor")
+        self.assertEqual((identity.run_id, identity.run_attempt), ("1234567890", 1))
+
+    def test_rejects_malformed_actor_id_without_echoing_it(self):
+        invalid = (
+            None,
+            12,
+            12.0,
+            True,
+            ["12"],
+            {"id": "12"},
+            "",
+            "0",
+            "012",
+            "-12",
+            "+12",
+            "1 2",
+            " 12",
+            "12 ",
+            "12\n",
+            "12a",
+            "0x1f",
+            "1e3",
+            "１２",
+            "synthetic-actor",
+        )
+        for actor_id in invalid:
+            with self.subTest(actor_id=actor_id):
+                with self.assertRaisesRegex(OidcVerificationError, "actor ID is malformed") as context:
+                    self.verifier.verify(self._token(self._claims(actor_id=actor_id)))
+                if isinstance(actor_id, str) and actor_id.strip():
+                    self.assertNotIn(actor_id.strip(), str(context.exception))
+
+    def test_actor_login_never_stands_in_for_the_actor_identity(self):
+        renamed = self.verifier.verify(self._token(self._claims(actor="renamed-login")))
+        original = self.verifier.verify(self._token())
+        self.assertEqual(renamed.actor_id, original.actor_id)
+        self.assertNotEqual(renamed.actor, original.actor)
+
+        claims = self._claims(actor="12")
+        del claims["actor_id"]
+        numeric_login = self.verifier.verify(self._token(claims))
+        self.assertEqual(numeric_login.actor, "12")
+        self.assertIsNone(numeric_login.actor_id)
+
+        claims = self._claims()
+        del claims["actor"]
+        without_login = self.verifier.verify(self._token(claims))
+        self.assertIsNone(without_login.actor)
+        self.assertEqual(without_login.actor_id, "12")
+
+        with self.assertRaisesRegex(OidcVerificationError, "actor ID is malformed"):
+            self.verifier.verify(self._token(self._claims(actor="12", actor_id="synthetic-actor")))
 
     def test_token_is_never_echoed_in_rejection_message(self):
         token = self._token(self._claims(aud="wrong-audience"))
