@@ -77,6 +77,7 @@ def _statement(n=1, **overrides) -> ApprovalStatement:
         workflow_ref="cleevengtonzephyr-ux/AI_DIRECTOR/.github/workflows/higgsfield-production.yml@refs/heads/main",
         run_id=str(987654320 + n),
         run_attempt=1,
+        run_actor_id="12",
         manifest_sha256="1" * 64,
         prompt_sha256="2" * 64,
         avatar_sha256="3" * 64,

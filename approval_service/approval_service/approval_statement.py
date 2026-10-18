@@ -18,13 +18,16 @@ _LOWER_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _APPROVAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _REPOSITORY_ID = re.compile(r"^[1-9][0-9]*$")
+# Same assumption as the OIDC verifier's `actor_id`: a positive ASCII decimal
+# string without a leading zero (GitHub's official example is "12").
+_GITHUB_ACCOUNT_ID = re.compile(r"^[1-9][0-9]*$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _WORKFLOW_REF = re.compile(r"^.+/\.github/workflows/[^@]+@refs/heads/main$")
 _JOB_TYPE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 _APPROVAL_WINDOW_MS = 600_000
 _AUTHORIZATION_WINDOW_MS = 300_000
-_CHALLENGE_DOMAIN = b"AI_DIRECTOR_APPROVAL_WEBAUTHN_V1\x00"
+_CHALLENGE_DOMAIN = b"AI_DIRECTOR_APPROVAL_WEBAUTHN_V2\x00"
 
 
 def _require_text(name: str, value: object, pattern: re.Pattern[str] | None = None) -> None:
@@ -48,6 +51,11 @@ class ApprovalStatement:
     Timestamp values are integer Unix milliseconds. The credit ceiling is
     deliberately fixed to ``None`` because G1 D-14 has not authorized a
     numeric generation budget; consumers must refuse a request with no cap.
+
+    Version 2 adds ``run_actor_id``, the numeric GitHub account ID that
+    initiated the run, taken from a verified OIDC ``actor_id``; the approver
+    signs it. The renamable ``actor`` login is never part of the statement.
+    Signing this ID does not resolve G1 D-5. Version 1 is not supported.
     """
 
     relying_party_id: str
@@ -59,6 +67,7 @@ class ApprovalStatement:
     workflow_ref: str
     run_id: str
     run_attempt: int
+    run_actor_id: str
     manifest_sha256: str
     prompt_sha256: str
     avatar_sha256: str
@@ -77,7 +86,7 @@ class ApprovalStatement:
     expires_at: int
     max_cost_credits_per_request: None = None
 
-    VERSION: ClassVar[int] = 1
+    VERSION: ClassVar[int] = 2
     RELYING_PARTY_ID: ClassVar[str] = "zephyr-approval.fr"
     AUTH_METHOD: ClassVar[str] = "webauthn"
 
@@ -97,6 +106,7 @@ class ApprovalStatement:
         _require_text("run_id", self.run_id, _REPOSITORY_ID)
         if type(self.run_attempt) is not int or self.run_attempt != 1:
             raise ValueError("run_attempt must be the first attempt")
+        _require_text("run_actor_id", self.run_actor_id, _GITHUB_ACCOUNT_ID)
 
         for name in (
             "manifest_sha256",
