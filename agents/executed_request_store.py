@@ -172,11 +172,19 @@ manager NON BLOQUANT, pris par `execute()` avant toute décision :
 - Le système libère ce verrou à l'arrêt du processus (fermeture des
   descripteurs) : un processus tué ne laisse aucune réservation
   détenue, contrairement aux verrous `O_CREAT | O_EXCL` ci-dessus.
-- Libération propre : le fichier est supprimé (sous POSIX avant la
-  levée du verrou ; sous Windows après fermeture, nouvel essai borné).
-  Après acquisition, le descripteur doit désigner le fichier régulier
+- Fichier STABLE : la libération ferme seulement le descripteur (sous
+  Windows, après un déverrouillage explicite) ; le fichier n'est jamais
+  supprimé et reste en place, vide. Le détenteur suivant verrouille donc
+  le même inode. Le supprimer pour le recréer ouvrirait une course : un
+  nouveau venu verrouillerait un nouvel inode pendant que l'ancien
+  détenteur tient encore l'ancien, et son contrôle d'identité passerait.
+- Ce fichier est un verrou vide : ni bail actif, ni marqueur
+  d'exécution. Sa présence ne signifie ni qu'une exécution est en cours
+  ni qu'elle a eu lieu ; seul le verrou système posé dessus compte, et
+  rien n'y est jamais écrit.
+- Après acquisition, le descripteur doit désigner le fichier régulier
   présent à ce chemin (même `st_dev`/`st_ino`) : un fichier supprimé ou
-  remplacé pendant l'acquisition est refusé, jamais un second détenteur.
+  remplacé entre l'ouverture et le verrou est refusé.
 - `InMemoryExecutionClaimRegistry` (store en mémoire) : exclusion entre
   threads d'un même processus seulement.
 - La réservation n'autorise rien et ne lit pas le registre : elle rend
@@ -201,11 +209,13 @@ obtient la réservation, puis :
   `mark_executed()`) : EXECUTION_STATE_UNKNOWN, aucun rejeu automatique ;
 - après `mark_executed()` : ALREADY_EXECUTED.
 Le fichier `<request_id>.execution-claim` laissé par un processus
-arrêté ne vaut ni autorisation ni blocage : la réservation suivante le
-reprend puis le supprime. Ne pas le supprimer à la main pendant qu'un
-processus peut tourner : sous POSIX, un second détenteur deviendrait
-possible (le marqueur « en vol », vérifié sous le verrou du store,
-refuserait encore un second `create_job()`). Le chemin réel
+arrêté est le même verrou vide qu'après une libération propre : ni
+autorisation ni blocage, la réservation suivante verrouille ce même
+inode. Ne jamais le supprimer ni le remplacer à la main pendant qu'un
+processus peut tourner : sous POSIX, un détenteur sur l'ancien inode et
+un autre sur le nouveau coexisteraient (le marqueur « en vol », vérifié
+sous le verrou du store, refuserait encore un second `create_job()`).
+Le supprimer quand aucun processus ne tourne est sans effet. Le chemin réel
 (`director.py`) garde en plus `FileCriticalSectionLock`, dont le verrou
 `<request_id>.lock` reste orphelin après un arrêt et bloque jusqu'à la
 revue humaine (P2.20, inchangé).
@@ -1077,24 +1087,6 @@ def _is_claimed_file(fd: int, path: Path) -> bool:
     )
 
 
-def _unlink_released_claim(path: Path) -> None:
-    # Windows : un autre descripteur ouvert (concurrent refusé, ou
-    # détenteur suivant) fait échouer la suppression. Nouvel essai borné,
-    # puis abandon : le fichier restant ne vaut rien, et un fichier
-    # détenu n'est jamais supprimable (aucun partage en suppression).
-    deadline = time.monotonic() + _LOCK_RELEASE_RETRY_SECONDS
-    while True:
-        try:
-            path.unlink()
-        except PermissionError:
-            if time.monotonic() < deadline:
-                time.sleep(_LOCK_RELEASE_RETRY_INTERVAL_SECONDS)
-                continue
-        except OSError:
-            pass
-        break
-
-
 class InMemoryExecutionClaimRegistry:
     """
     Phase G2 — réservations EN MÉMOIRE : exclusion entre threads d'un
@@ -1123,8 +1115,9 @@ class FileExecutionClaimRegistry:
     """
     Phase G2 — un fichier `<request_id>.execution-claim` par requête dans
     `claim_dir`, verrouillé par le système le temps du bloc `with` (cf.
-    docstring de module). Rien n'est écrit dans le fichier : seul le
-    verrou compte, et le système le libère si le processus s'arrête.
+    docstring de module). Verrou vide et stable : rien n'y est écrit, il
+    n'est jamais supprimé, et le système le libère si le processus
+    s'arrête.
     """
 
     def __init__(self, claim_dir: Path) -> None:
@@ -1147,19 +1140,14 @@ class FileExecutionClaimRegistry:
         try:
             yield
         finally:
-            self._release(fd, path)
+            # Libération : fermeture seule, le fichier reste en place (cf.
+            # « Fichier STABLE » dans la docstring de module).
+            _close_claim_fd(fd, locked=True)
 
     def _acquire(self, request_id: str, path: Path) -> int:
         try:
             self.claim_dir.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(path), _CLAIM_OPEN_FLAGS, 0o600)
-        except PermissionError as error:
-            if os.name == "nt":
-                # Windows : fichier en cours de suppression par le
-                # détenteur qui se libère -- même issue qu'une réservation
-                # détenue.
-                raise _claim_busy(request_id, f"claim file '{path}' refused: {error}") from error
-            raise _claim_refused(request_id, path, error) from error
         except OSError as error:
             raise _claim_refused(request_id, path, error) from error
 
@@ -1181,23 +1169,3 @@ class FileExecutionClaimRegistry:
             _close_claim_fd(fd, locked)
             raise
         return fd
-
-    @staticmethod
-    def _release(fd: int, path: Path) -> None:
-        if os.name == "nt":
-            # Un fichier ouvert ne peut pas être supprimé : fermeture
-            # d'abord.
-            try:
-                _close_claim_fd(fd, locked=True)
-            finally:
-                _unlink_released_claim(path)
-            return
-        # POSIX : suppression AVANT la levée du verrou -- un concurrent qui
-        # verrouillerait ensuite l'ancien fichier échoue au contrôle
-        # d'identité de `_acquire()`.
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        finally:
-            os.close(fd)

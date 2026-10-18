@@ -320,7 +320,13 @@ class TestObjective4G2_AtomicClaimHasExactlyOneWinner(unittest.TestCase):
                     proc.communicate()
 
     def _assert_no_claim_left(self):
-        self.assertEqual(list(self.state_path.parent.glob("*.execution-claim")), [])
+        # Le fichier de réservation reste en place : un verrou vide, ni bail
+        # ni marqueur d'exécution, de nouveau disponible sans attente.
+        claim_files = list(self.state_path.parent.glob("*.execution-claim"))
+        self.assertEqual([path.name for path in claim_files], ["005.execution-claim"])
+        self.assertEqual(claim_files[0].stat().st_size, 0)
+        with FileExecutedRequestStore(self.state_path).execution_claims.claim("005"):
+            pass
 
     def test_only_one_process_obtains_the_claim_and_observes_not_executed(self):
         results = self._race("store")

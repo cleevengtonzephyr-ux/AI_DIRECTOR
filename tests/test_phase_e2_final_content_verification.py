@@ -53,7 +53,11 @@ import agents.generation_job_service as job_service_module
 from agents.activation_contract import RequestScopedActivationService
 from agents.controlled_real_provider_activation import ControlledRealProviderActivationService
 from agents.critical_section_lock import FileCriticalSectionLock
-from agents.executed_request_store import FileExecutedRequestStore
+from agents.executed_request_store import (
+    EXECUTION_CLAIM_SUFFIX,
+    FileExecutedRequestStore,
+    FileExecutionClaimRegistry,
+)
 from agents.final_report_service import ActivationDecision, FinalReportService, FinalReportStatus
 from agents.generation_approval_gate import (
     AUTHORIZATION_CONTENT_DIGEST_FIELDS,
@@ -217,13 +221,28 @@ class _Sandbox(unittest.TestCase):
 
     # --- assertions ---------------------------------------------------
 
+    def _written_state(self):
+        """Entrées du dossier d'état, hors verrou de réservation G2 : ce
+        fichier reste en place, vide (ni enregistrement, ni marqueur, ni
+        registre de consommation) ; il doit seulement être libéré."""
+
+        written = []
+        for path in sorted(self.state_dir.glob("*")) if self.state_dir.exists() else []:
+            if path.name.endswith(EXECUTION_CLAIM_SUFFIX):
+                self.assertEqual(path.stat().st_size, 0, "an execution claim file is an empty lock")
+                with FileExecutionClaimRegistry(self.state_dir).claim(path.name[: -len(EXECUTION_CLAIM_SUFFIX)]):
+                    pass  # libéré
+            else:
+                written.append(path.name)
+        return written
+
     def assertNothingWasConsumedOrWritten(self, provider, gate, request):
         authorization = request.real_generation_authorization
         self.assertEqual(provider._jobs, {}, "no job may exist in the Mock")
         self.assertFalse(gate.is_authorization_consumed(authorization.authorization_id))
         self.assertFalse(gate.is_already_executed(request.request_id))
         self.assertFalse(gate.executed_request_store.is_unknown(request.request_id))
-        written = sorted(p.name for p in self.state_dir.glob("*")) if self.state_dir.exists() else []
+        written = self._written_state()
         self.assertEqual(written, [], "no execution record, in-flight marker or consumption registry")
         leftover_locks = sorted(p.name for p in self.lock_dir.glob("*")) if self.lock_dir.exists() else []
         self.assertEqual(leftover_locks, [], "the critical section must be released")
@@ -866,7 +885,7 @@ class RealProviderAndPhaseDGuardAreUnchanged(_Sandbox):
 
         client.create_job.assert_not_called()
         self.assertFalse(gate.is_authorization_consumed(request.real_generation_authorization.authorization_id))
-        self.assertFalse(self.state_dir.exists() and any(self.state_dir.glob("*")))
+        self.assertEqual(self._written_state(), [])
 
     def test_unsafe_provider_is_still_refused_before_anything_else(self):
         class _MockSubclass(MockHiggsfieldProvider):
