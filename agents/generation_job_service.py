@@ -76,6 +76,31 @@ CRITICAL SECTION & CRASH RECOVERY (Phase P2.20) :
       situation derrière un rapport typé qui laisserait croire à un
       état géré.
 
+RÉSERVATION ATOMIQUE D'EXÉCUTION (Phase G2, course P2.16) :
+- Avec le `NoOpCriticalSectionLock` par défaut, deux processus
+  pouvaient évaluer la même requête en même temps, tous deux APPROVED,
+  et interroger le Provider ; seul le marqueur « en vol » (P3.91)
+  arrêtait le second, après la consommation de sa propre autorisation.
+- Désormais `execute()` prend TOUJOURS `gate.claim_execution(
+  request_id)` (cf. agents/executed_request_store.py), première
+  instruction dans le verrou de section critique, AVANT
+  `gate.evaluate()`, et le garde jusqu'après `mark_executed()`. Une
+  seule exécution détient la réservation ; une exécution concurrente
+  reçoit `ExecutionClaimBusyError` sans évaluation, sans consommation,
+  sans écriture et sans AUCUN appel Provider. Comme
+  `CriticalSectionBusyError`, elle se propage sans être interceptée (un
+  rapport typé ferait réévaluer la requête par `FinalReportService`,
+  donc appeler le Provider). Store sans registre de réservations ->
+  `ExecutedRequestStoreCorruptedError`, même issue.
+- Le verrou de section critique injecté (`FileCriticalSectionLock` sur
+  le chemin réel) reste pris en premier, inchangé. `wait_for_job()`
+  reste hors de la réservation, pour la même raison que hors du verrou.
+- Arrêt du processus après la réservation : le système libère le
+  verrou de réservation, et les registres durables (autorisation
+  consommée, marqueur « en vol », `executed_requests`) décident de
+  l'essai suivant -- détail par instant d'arrêt dans
+  agents/executed_request_store.py (« ARRÊT APRÈS LA RÉSERVATION »).
+
 ACTIVATION CONTRACT WIRING (Phase P2.22) :
 - `activation_service` (optionnel, `agents/activation_contract.py`,
   Phase P2.21) : par défaut (`None`), AUCUNE vérification
@@ -486,6 +511,12 @@ class GenerationJobService:
         `CriticalSectionBusyError` se propage sans être interceptée.
         `wait_for_job()` reste délibérément hors du verrou.
 
+        Phase G2 : dans ce verrou, la même séquence est prise sous la
+        réservation atomique `gate.claim_execution(request_id)`, avant
+        `gate.evaluate()`. `ExecutionClaimBusyError` (exécution
+        concurrente) se propage sans être interceptée, sans aucun appel
+        Provider.
+
         Phase P2.22 : `activation_contract`, si fourni EXPLICITEMENT
         par l'appelant (jamais créé ici), est validé DANS le verrou,
         juste après l'approbation fraîche du Gate et juste avant
@@ -551,207 +582,218 @@ class GenerationJobService:
                 )
 
         with self.lock.acquire(request.request_id):
-            approval = self.gate.evaluate(request)
+            # Phase G2 (course P2.16) : réservation atomique de CE
+            # `request_id`, prise AVANT la décision et gardée jusqu'après
+            # `mark_executed()`. Une exécution concurrente est refusée ici
+            # (`ExecutionClaimBusyError`), avant tout appel Provider ; elle
+            # se propage sans être interceptée, comme
+            # `CriticalSectionBusyError`. Le système libère ce verrou si le
+            # processus s'arrête : la protection contre le rejeu reste
+            # portée par les registres durables (cf.
+            # agents/executed_request_store.py, « ARRÊT APRÈS LA
+            # RÉSERVATION »).
+            with self.gate.claim_execution(request.request_id):
+                approval = self.gate.evaluate(request)
 
-            if approval.decision != GenerationApprovalDecision.APPROVED:
-                raise GenerationJobExecutionError(
-                    f"Cannot execute job for request '{request.request_id}': "
-                    f"GenerationApprovalGate decision is "
-                    f"{approval.decision.value}, not APPROVED. "
-                    f"Reasons: {'; '.join(approval.reasons) or 'none provided'}",
-                    approval=approval,
-                )
-
-            if activation_contract is not None:
-                # Phase P2.27 : vérifié via `inspect_activation()` --
-                # NON MUTANTE -- plutôt que `validate_activation()`
-                # directement, pour que la couche P2.26 ci-dessous
-                # (qui ré-inspecte elle-même ce même contrat P2.21)
-                # le trouve encore fraîchement valide. La consommation
-                # définitive du contrat P2.21 est différée après TOUTE
-                # vérification (cf. `self.activation_service.consume()`
-                # juste avant `create_job()` ci-dessous) -- comportement
-                # observable STRICTEMENT identique à avant P2.27 pour
-                # tout appelant qui ne fournit pas de
-                # `provider_activation_contract` : la même vérification
-                # (`_activation_violations()`) est exécutée, puis le
-                # contrat est consommé avant `create_job()`, exactement
-                # comme le faisait `validate_activation()` seule.
-                activation_violations = self.activation_service.inspect_activation(
-                    request, activation_contract
-                )
-                if activation_violations:
-                    raise GenerationJobActivationRejectedError(
-                        f"Cannot execute job for request "
-                        f"'{request.request_id}': activation contract "
-                        f"'{activation_contract.activation_id}' was "
-                        f"rejected. Reasons: "
-                        f"{'; '.join(activation_violations) or 'none provided'}",
+                if approval.decision != GenerationApprovalDecision.APPROVED:
+                    raise GenerationJobExecutionError(
+                        f"Cannot execute job for request '{request.request_id}': "
+                        f"GenerationApprovalGate decision is "
+                        f"{approval.decision.value}, not APPROVED. "
+                        f"Reasons: {'; '.join(approval.reasons) or 'none provided'}",
                         approval=approval,
-                        activation_rejection=ActivationRejectedError(
-                            f"Cannot validate activation contract "
-                            f"'{activation_contract.activation_id}' for "
-                            f"request '{request.request_id}'.",
-                            activation_violations,
-                        ),
                     )
 
-            # Phase E2 : DERNIER contrôle du contenu par ce module -- après
-            # le Gate et l'inspection (non mutante) du contrat P2.21, AVANT
-            # toute consommation : `provider_activation_service.validate()`
-            # juste en dessous consomme le contrat P2.26 DANS le même appel
-            # que sa validation, ce contrôle doit donc le précéder pour
-            # qu'un refus ne brûle rien (contrats P2.21/P2.26, autorisation,
-            # marqueur « en vol »). Dernière lecture des fichiers par ce
-            # module : les valeurs vérifiées ici sont celles transmises à
-            # `create_job()` plus bas, jamais recalculées. Un remplacement
-            # postérieur n'est détecté que par `validate()` (P2.26), qui
-            # relit les fichiers et ne peut que refuser ; au-delà, il ne
-            # l'est pas (cf. docstring de module).
-            verified_digests = authorization_content_digests(request)
-            content_violations = _final_content_violations(request, verified_digests)
-            if content_violations:
-                raise GenerationJobContentChangedError(
-                    f"Cannot execute job for request "
-                    f"'{request.request_id}': its content no longer "
-                    f"matches the authorization at the final check, "
-                    f"before any consumption. Reasons: "
-                    f"{'; '.join(content_violations)}",
-                    approval=approval,
-                    reasons=content_violations,
-                )
-
-            if provider_activation_contract is not None:
-                try:
-                    self.provider_activation_service.validate(
-                        request, activation_contract, provider_activation_contract
+                if activation_contract is not None:
+                    # Phase P2.27 : vérifié via `inspect_activation()` --
+                    # NON MUTANTE -- plutôt que `validate_activation()`
+                    # directement, pour que la couche P2.26 ci-dessous
+                    # (qui ré-inspecte elle-même ce même contrat P2.21)
+                    # le trouve encore fraîchement valide. La consommation
+                    # définitive du contrat P2.21 est différée après TOUTE
+                    # vérification (cf. `self.activation_service.consume()`
+                    # juste avant `create_job()` ci-dessous) -- comportement
+                    # observable STRICTEMENT identique à avant P2.27 pour
+                    # tout appelant qui ne fournit pas de
+                    # `provider_activation_contract` : la même vérification
+                    # (`_activation_violations()`) est exécutée, puis le
+                    # contrat est consommé avant `create_job()`, exactement
+                    # comme le faisait `validate_activation()` seule.
+                    activation_violations = self.activation_service.inspect_activation(
+                        request, activation_contract
                     )
-                except ControlledRealProviderActivationRejectedError as provider_activation_error:
-                    raise GenerationJobProviderActivationRejectedError(
+                    if activation_violations:
+                        raise GenerationJobActivationRejectedError(
+                            f"Cannot execute job for request "
+                            f"'{request.request_id}': activation contract "
+                            f"'{activation_contract.activation_id}' was "
+                            f"rejected. Reasons: "
+                            f"{'; '.join(activation_violations) or 'none provided'}",
+                            approval=approval,
+                            activation_rejection=ActivationRejectedError(
+                                f"Cannot validate activation contract "
+                                f"'{activation_contract.activation_id}' for "
+                                f"request '{request.request_id}'.",
+                                activation_violations,
+                            ),
+                        )
+
+                # Phase E2 : DERNIER contrôle du contenu par ce module -- après
+                # le Gate et l'inspection (non mutante) du contrat P2.21, AVANT
+                # toute consommation : `provider_activation_service.validate()`
+                # juste en dessous consomme le contrat P2.26 DANS le même appel
+                # que sa validation, ce contrôle doit donc le précéder pour
+                # qu'un refus ne brûle rien (contrats P2.21/P2.26, autorisation,
+                # marqueur « en vol »). Dernière lecture des fichiers par ce
+                # module : les valeurs vérifiées ici sont celles transmises à
+                # `create_job()` plus bas, jamais recalculées. Un remplacement
+                # postérieur n'est détecté que par `validate()` (P2.26), qui
+                # relit les fichiers et ne peut que refuser ; au-delà, il ne
+                # l'est pas (cf. docstring de module).
+                verified_digests = authorization_content_digests(request)
+                content_violations = _final_content_violations(request, verified_digests)
+                if content_violations:
+                    raise GenerationJobContentChangedError(
                         f"Cannot execute job for request "
-                        f"'{request.request_id}': controlled "
-                        f"real-provider activation contract "
-                        f"'{provider_activation_contract.activation_id}' "
-                        f"was rejected. Reasons: "
-                        f"{'; '.join(provider_activation_error.reasons) or 'none provided'}",
+                        f"'{request.request_id}': its content no longer "
+                        f"matches the authorization at the final check, "
+                        f"before any consumption. Reasons: "
+                        f"{'; '.join(content_violations)}",
                         approval=approval,
-                        provider_activation_rejection=provider_activation_error,
-                    ) from provider_activation_error
-
-            # Consommation définitive du contrat P2.21 -- APRÈS que la
-            # couche P2.26 (si présente) a également validé avec
-            # succès, jamais avant (cf. commentaire ci-dessus).
-            if activation_contract is not None:
-                self.activation_service.consume(activation_contract)
-
-            job_params = {
-                key: value
-                for key, value in {
-                    "duration": request.duration,
-                    "resolution": request.resolution,
-                    "aspect_ratio": request.aspect_ratio,
-                }.items()
-                if value is not None
-            }
-
-            # Phase P2.32 : `provider_activation_contract` (P2.26),
-            # s'il a été fourni ET validé ci-dessus, est désormais
-            # transmis EXPLICITEMENT au Provider -- jamais deviné,
-            # jamais construit ici. `None` (cas de TOUT chemin de
-            # production actuel : director.py ne fournit jamais ce
-            # contrat aujourd'hui) préserve un comportement strictement
-            # identique à avant P2.32.
-            #
-            # Phase P2.35 : `request_id`/`avatar_sha256`/`face_reference_
-            # sha256` sont désormais ÉGALEMENT transmis explicitement --
-            # calculés EN DIRECT, depuis la `GenerationRequest`
-            # RÉELLEMENT évaluée par ce `execute()` (jamais réutilisés
-            # d'un appel précédent) -- afin que le Provider puisse
-            # comparer ces valeurs LIVE à celles
-            # portées par `provider_activation_contract`, comme une
-            # couche de vérification supplémentaire et INDÉPENDANTE à sa
-            # propre frontière (cf. integrations/higgsfield/provider.py).
-            # Le Provider réel (HiggsfieldProvider.create_job()) reste
-            # néanmoins INCONDITIONNELLEMENT bloqué -- ce transfert
-            # prépare uniquement l'interface pour une future phase
-            # explicitement autorisée.
-            # Phase E2 : ces deux empreintes sont celles de
-            # `verified_digests` (dernier contrôle ci-dessus), plus
-            # recalculées ici après la consommation.
-            # Phase P3.91 (RISK #1 de P3.90) : write-ahead DURABLE avant
-            # `create_job()`. Tant que `mark_executed()` ne l'a pas
-            # remplacé (même écriture atomique), ce marqueur est lu comme
-            # EXECUTION_STATE_UNKNOWN : un crash dur, un KeyboardInterrupt
-            # ou une exception de `create_job()` après acceptation côté
-            # backend laissent une trace BLOQUANTE, jamais une absence de
-            # trace. S'il ne peut pas être écrit, `create_job()` n'est
-            # jamais appelé.
-            # Seul `HiggsfieldRealGenerationDisabledError` (refus du
-            # Provider AVANT tout appel client) annule CE marqueur ; toute
-            # autre sortie par exception laisse la requête UNKNOWN.
-            # Phase B : consommation DÉFINITIVE de l'autorisation approuvée
-            # ci-dessus, dans le registre séparé (jamais executed_requests
-            # .json, invariant P3.89), AVANT le marqueur et `create_job()`.
-            # Pas de transaction commune : un arrêt entre cette écriture et
-            # le marqueur brûle l'autorisation sans exécution (échec
-            # fermé). Identifiant invalide, déjà consommé, registre
-            # absent/illisible/verrouillé, écriture impossible :
-            # exception ici, `create_job()` n'est jamais appelé.
-            self.gate.consume_authorization(
-                request.request_id,
-                getattr(request.real_generation_authorization, "authorization_id", None),
-            )
-            with self.gate.in_flight(request.request_id):
-                job = self.provider.create_job(
-                    job_type=request.job_type,
-                    prompt=request.prompt,
-                    provider_activation_contract=provider_activation_contract,
-                    request_id=request.request_id,
-                    avatar_sha256=verified_digests["avatar_sha256"],
-                    face_reference_sha256=verified_digests["face_reference_sha256"],
-                    **job_params,
-                )
-
-            # Marqué exécuté immédiatement après création — avant même
-            # le polling — car c'est la CRÉATION du job qui ne doit
-            # jamais être dupliquée, indépendamment de l'issue du
-            # polling. Phase P2.20 : si CET enregistrement échoue,
-            # create_job() a déjà réussi -- l'état est désormais
-            # ambigu et ne doit jamais être traité en silence.
-            # Phase P3.89 (GAP #1) : `job.job_id` est persisté DANS le
-            # même enregistrement anti-rejeu, pour que le job créé reste
-            # retrouvable localement après un crash pendant le polling.
-            try:
-                self.gate.mark_executed(request.request_id, job_id=job.job_id)
-            except Exception as mark_executed_error:
-                try:
-                    self.gate.mark_unknown(
-                        request.request_id,
-                        reason=(
-                            f"create_job() succeeded (job_id="
-                            f"{job.job_id!r}) but mark_executed() failed: "
-                            f"{mark_executed_error}"
-                        ),
-                        job_id=job.job_id,
+                        reasons=content_violations,
                     )
-                except Exception as mark_unknown_error:
-                    raise CriticalStateUnknownAndUnrecordedError(
+
+                if provider_activation_contract is not None:
+                    try:
+                        self.provider_activation_service.validate(
+                            request, activation_contract, provider_activation_contract
+                        )
+                    except ControlledRealProviderActivationRejectedError as provider_activation_error:
+                        raise GenerationJobProviderActivationRejectedError(
+                            f"Cannot execute job for request "
+                            f"'{request.request_id}': controlled "
+                            f"real-provider activation contract "
+                            f"'{provider_activation_contract.activation_id}' "
+                            f"was rejected. Reasons: "
+                            f"{'; '.join(provider_activation_error.reasons) or 'none provided'}",
+                            approval=approval,
+                            provider_activation_rejection=provider_activation_error,
+                        ) from provider_activation_error
+
+                # Consommation définitive du contrat P2.21 -- APRÈS que la
+                # couche P2.26 (si présente) a également validé avec
+                # succès, jamais avant (cf. commentaire ci-dessus).
+                if activation_contract is not None:
+                    self.activation_service.consume(activation_contract)
+
+                job_params = {
+                    key: value
+                    for key, value in {
+                        "duration": request.duration,
+                        "resolution": request.resolution,
+                        "aspect_ratio": request.aspect_ratio,
+                    }.items()
+                    if value is not None
+                }
+
+                # Phase P2.32 : `provider_activation_contract` (P2.26),
+                # s'il a été fourni ET validé ci-dessus, est désormais
+                # transmis EXPLICITEMENT au Provider -- jamais deviné,
+                # jamais construit ici. `None` (cas de TOUT chemin de
+                # production actuel : director.py ne fournit jamais ce
+                # contrat aujourd'hui) préserve un comportement strictement
+                # identique à avant P2.32.
+                #
+                # Phase P2.35 : `request_id`/`avatar_sha256`/`face_reference_
+                # sha256` sont désormais ÉGALEMENT transmis explicitement --
+                # calculés EN DIRECT, depuis la `GenerationRequest`
+                # RÉELLEMENT évaluée par ce `execute()` (jamais réutilisés
+                # d'un appel précédent) -- afin que le Provider puisse
+                # comparer ces valeurs LIVE à celles
+                # portées par `provider_activation_contract`, comme une
+                # couche de vérification supplémentaire et INDÉPENDANTE à sa
+                # propre frontière (cf. integrations/higgsfield/provider.py).
+                # Le Provider réel (HiggsfieldProvider.create_job()) reste
+                # néanmoins INCONDITIONNELLEMENT bloqué -- ce transfert
+                # prépare uniquement l'interface pour une future phase
+                # explicitement autorisée.
+                # Phase E2 : ces deux empreintes sont celles de
+                # `verified_digests` (dernier contrôle ci-dessus), plus
+                # recalculées ici après la consommation.
+                # Phase P3.91 (RISK #1 de P3.90) : write-ahead DURABLE avant
+                # `create_job()`. Tant que `mark_executed()` ne l'a pas
+                # remplacé (même écriture atomique), ce marqueur est lu comme
+                # EXECUTION_STATE_UNKNOWN : un crash dur, un KeyboardInterrupt
+                # ou une exception de `create_job()` après acceptation côté
+                # backend laissent une trace BLOQUANTE, jamais une absence de
+                # trace. S'il ne peut pas être écrit, `create_job()` n'est
+                # jamais appelé.
+                # Seul `HiggsfieldRealGenerationDisabledError` (refus du
+                # Provider AVANT tout appel client) annule CE marqueur ; toute
+                # autre sortie par exception laisse la requête UNKNOWN.
+                # Phase B : consommation DÉFINITIVE de l'autorisation approuvée
+                # ci-dessus, dans le registre séparé (jamais executed_requests
+                # .json, invariant P3.89), AVANT le marqueur et `create_job()`.
+                # Pas de transaction commune : un arrêt entre cette écriture et
+                # le marqueur brûle l'autorisation sans exécution (échec
+                # fermé). Identifiant invalide, déjà consommé, registre
+                # absent/illisible/verrouillé, écriture impossible :
+                # exception ici, `create_job()` n'est jamais appelé.
+                self.gate.consume_authorization(
+                    request.request_id,
+                    getattr(request.real_generation_authorization, "authorization_id", None),
+                )
+                with self.gate.in_flight(request.request_id):
+                    job = self.provider.create_job(
+                        job_type=request.job_type,
+                        prompt=request.prompt,
+                        provider_activation_contract=provider_activation_contract,
+                        request_id=request.request_id,
+                        avatar_sha256=verified_digests["avatar_sha256"],
+                        face_reference_sha256=verified_digests["face_reference_sha256"],
+                        **job_params,
+                    )
+
+                # Marqué exécuté immédiatement après création — avant même
+                # le polling — car c'est la CRÉATION du job qui ne doit
+                # jamais être dupliquée, indépendamment de l'issue du
+                # polling. Phase P2.20 : si CET enregistrement échoue,
+                # create_job() a déjà réussi -- l'état est désormais
+                # ambigu et ne doit jamais être traité en silence.
+                # Phase P3.89 (GAP #1) : `job.job_id` est persisté DANS le
+                # même enregistrement anti-rejeu, pour que le job créé reste
+                # retrouvable localement après un crash pendant le polling.
+                try:
+                    self.gate.mark_executed(request.request_id, job_id=job.job_id)
+                except Exception as mark_executed_error:
+                    try:
+                        self.gate.mark_unknown(
+                            request.request_id,
+                            reason=(
+                                f"create_job() succeeded (job_id="
+                                f"{job.job_id!r}) but mark_executed() failed: "
+                                f"{mark_executed_error}"
+                            ),
+                            job_id=job.job_id,
+                        )
+                    except Exception as mark_unknown_error:
+                        raise CriticalStateUnknownAndUnrecordedError(
+                            f"Request '{request.request_id}': create_job() "
+                            f"succeeded (job_id={job.job_id!r}) but BOTH "
+                            f"mark_executed() and mark_unknown() failed. "
+                            f"mark_executed error: {mark_executed_error}; "
+                            f"mark_unknown error: {mark_unknown_error}. "
+                            f"Manual review required immediately."
+                        ) from mark_unknown_error
+
+                    raise GenerationJobUnknownStateError(
                         f"Request '{request.request_id}': create_job() "
-                        f"succeeded (job_id={job.job_id!r}) but BOTH "
-                        f"mark_executed() and mark_unknown() failed. "
-                        f"mark_executed error: {mark_executed_error}; "
-                        f"mark_unknown error: {mark_unknown_error}. "
-                        f"Manual review required immediately."
-                    ) from mark_unknown_error
-
-                raise GenerationJobUnknownStateError(
-                    f"Request '{request.request_id}': create_job() "
-                    f"succeeded (job_id={job.job_id!r}) but "
-                    f"mark_executed() failed ({mark_executed_error}); "
-                    f"state recorded as UNKNOWN (EXECUTION_STATE_UNKNOWN). "
-                    f"Manual review required before any further action.",
-                    job=job,
-                ) from mark_executed_error
+                        f"succeeded (job_id={job.job_id!r}) but "
+                        f"mark_executed() failed ({mark_executed_error}); "
+                        f"state recorded as UNKNOWN (EXECUTION_STATE_UNKNOWN). "
+                        f"Manual review required before any further action.",
+                        job=job,
+                    ) from mark_executed_error
 
         result = self.provider.wait_for_job(
             job.job_id,

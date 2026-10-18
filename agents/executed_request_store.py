@@ -51,9 +51,10 @@ LIMITES CONNUES EN P2.15, DÉSORMAIS ADRESSÉES EN P2.20 :
   `agents/critical_section_lock.py`, appelé par
   `GenerationJobService.execute()` AUTOUR de la séquence complète
   check-not-executed -> approbation finale -> create_job ->
-  mark_executed. Ce module (executed_request_store.py) reste
-  responsable UNIQUEMENT du registre lui-même, jamais de
-  l'exclusion mutuelle.
+  mark_executed -- mais seulement quand un `FileCriticalSectionLock`
+  est injecté. Depuis la Phase G2, ce module fournit en plus la
+  réservation atomique par `request_id` que ce même `execute()` prend
+  toujours (cf. « PHASE G2 » ci-dessous).
 - Le crash entre un `create_job()` réel réussi et `mark_executed()`
   (P2.19/P2.20) est désormais représenté explicitement par un second
   registre, `unknown_requests` (cf. `is_unknown()`/`mark_unknown()`
@@ -151,12 +152,83 @@ store est inchangée).
 - Le lien autorisation <-> empreintes prompt/avatar/référence visage
   est vérifié par `GenerationApprovalGate` (jamais stocké ici).
 - Non couvert : aucune identité authentifiée.
+
+PHASE G2 — RÉSERVATION ATOMIQUE D'EXÉCUTION (course P2.16) :
+P2.16 a montré que deux processus pouvaient constater ensemble « non
+exécuté » : `is_executed()` puis `mark_executed()` ne forment pas une
+opération atomique, et `GenerationJobService.execute()` n'avait
+d'exclusion que si un `FileCriticalSectionLock` lui était injecté
+(`NoOpCriticalSectionLock` par défaut). Chaque store expose désormais un
+registre de réservations, attribut `execution_claims` (même forme que
+`authorization_registry`), dont `claim(request_id)` est un context
+manager NON BLOQUANT, pris par `execute()` avant toute décision :
+- `FileExecutionClaimRegistry` : fichier `<request_id>.execution-claim`
+  dans le dossier d'état, verrouillé par le système (`msvcrt.locking`
+  sous Windows, `fcntl.flock` sous POSIX). Chaque réservation ouvre son
+  propre descripteur : un seul détenteur, entre processus comme entre
+  threads. Réservation détenue -> `ExecutionClaimBusyError` immédiate ;
+  identifiant invalide, fichier inutilisable, primitive en échec ->
+  `ExecutionClaimRefusedError`. Jamais d'attente.
+- Le système libère ce verrou à l'arrêt du processus (fermeture des
+  descripteurs) : un processus tué ne laisse aucune réservation
+  détenue, contrairement aux verrous `O_CREAT | O_EXCL` ci-dessus.
+- Fichier STABLE : la libération ferme seulement le descripteur (sous
+  Windows, après un déverrouillage explicite) ; le fichier n'est jamais
+  supprimé et reste en place, vide. Le détenteur suivant verrouille donc
+  le même inode. Le supprimer pour le recréer ouvrirait une course : un
+  nouveau venu verrouillerait un nouvel inode pendant que l'ancien
+  détenteur tient encore l'ancien, et son contrôle d'identité passerait.
+- Ce fichier est un verrou vide : ni bail actif, ni marqueur
+  d'exécution. Sa présence ne signifie ni qu'une exécution est en cours
+  ni qu'elle a eu lieu ; seul le verrou système posé dessus compte, et
+  rien n'y est jamais écrit.
+- Après acquisition, le descripteur doit désigner le fichier régulier
+  présent à ce chemin (même `st_dev`/`st_ino`) : un fichier supprimé ou
+  remplacé entre l'ouverture et le verrou est refusé.
+- `InMemoryExecutionClaimRegistry` (store en mémoire) : exclusion entre
+  threads d'un même processus seulement.
+- La réservation n'autorise rien et ne lit pas le registre : elle rend
+  EXCLUSIVE la décision prise sous elle. `GenerationApprovalGate.
+  evaluate()` relit l'état persistant SOUS la réservation ; un état
+  corrompu, illisible ou verrouillé y donne BLOCKED (fail closed),
+  jamais APPROVED, et rien n'est consommé ni créé.
+
+ARRÊT APRÈS LA RÉSERVATION — aucun rejeu accidentel :
+La réservation ne survit pas à l'arrêt de son détenteur, c'est voulu :
+ce qu'une tentative a pu faire est porté par les registres durables,
+jamais par le verrou. Selon l'instant de l'arrêt, l'essai suivant
+obtient la réservation, puis :
+- avant la consommation de l'autorisation : aucune trace, et aucun
+  `create_job()` n'a pu avoir lieu (le marqueur « en vol » le précède
+  toujours) -- nouvelle évaluation normale, ce n'est pas un rejeu ;
+- après la consommation, avant le marqueur : NEEDS_APPROVAL pour cette
+  autorisation, une nouvelle autorisation humaine est requise ;
+- pendant l'écriture du marqueur : marqueur absent (écriture atomique),
+  verrou du store orphelin -> BLOCKED jusqu'à la revue humaine ;
+- marqueur écrit (pendant ou après `create_job()`, avant
+  `mark_executed()`) : EXECUTION_STATE_UNKNOWN, aucun rejeu automatique ;
+- après `mark_executed()` : ALREADY_EXECUTED.
+Le fichier `<request_id>.execution-claim` laissé par un processus
+arrêté est le même verrou vide qu'après une libération propre : ni
+autorisation ni blocage, la réservation suivante verrouille ce même
+inode. Ne jamais le supprimer ni le remplacer à la main pendant qu'un
+processus peut tourner : sous POSIX, un détenteur sur l'ancien inode et
+un autre sur le nouveau coexisteraient (le marqueur « en vol », vérifié
+sous le verrou du store, refuserait encore un second `create_job()`).
+Le supprimer quand aucun processus ne tourne est sans effet. Le chemin réel
+(`director.py`) garde en plus `FileCriticalSectionLock`, dont le verrou
+`<request_id>.lock` reste orphelin après un arrêt et bloque jusqu'à la
+revue humaine (P2.20, inchangé).
+Portée : une machine, un dossier d'état local partagé (`flock` n'est
+pas fiable sur un système de fichiers réseau).
 """
 
+import errno
 import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -165,6 +237,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Set
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+from agents.request_id_validation import contained_child_path, validate_request_id
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 
 # Phase P3.98 (D3) : nouvel essai borné de la suppression du verrou à la
@@ -228,6 +306,23 @@ class InvalidAuthorizationIdError(ValueError):
     toute lecture/écriture du registre."""
 
 
+class ExecutionClaimRefusedError(RuntimeError):
+    """
+    Phase G2 — réservation d'exécution refusée : `request_id` invalide,
+    fichier de réservation inutilisable, supprimé ou remplacé pendant
+    l'acquisition, ou primitive de verrou en échec. FAIL CLOSED : levée
+    par `GenerationJobService.execute()` avant `gate.evaluate()`, donc
+    avant tout appel Provider ; jamais interceptée par ce service ni par
+    `FinalReportService` (comme `CriticalSectionBusyError`).
+    """
+
+
+class ExecutionClaimBusyError(ExecutionClaimRefusedError):
+    """Phase G2 — une autre exécution vivante (autre processus, autre
+    thread ou bloc non refermé) détient la réservation de ce
+    `request_id`. Refus immédiat, jamais d'attente ni de nouvel essai."""
+
+
 _AUTHORIZATION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
@@ -276,6 +371,9 @@ class InMemoryExecutedRequestStore:
     Phase B : `authorization_registry` est un registre de consommation
     EN MÉMOIRE (sûr entre threads, portée limitée au processus) -- il ne
     fournit AUCUNE consommation durable après redémarrage.
+
+    Phase G2 : `execution_claims` réserve un `request_id` entre threads
+    de ce processus seulement.
     """
 
     def __init__(self) -> None:
@@ -285,6 +383,7 @@ class InMemoryExecutedRequestStore:
         self._unknown_job_ids: Dict[str, str] = {}
         self._in_flight_request_ids: Set[str] = set()
         self.authorization_registry = InMemoryAuthorizationConsumptionRegistry()
+        self.execution_claims = InMemoryExecutionClaimRegistry()
 
     def is_executed(self, request_id: str) -> bool:
         return request_id in self._executed_request_ids
@@ -376,6 +475,9 @@ class FileExecutedRequestStore:
             self.path.with_name(CONSUMED_AUTHORIZATIONS_FILENAME),
             lock_timeout_seconds=lock_timeout_seconds,
         )
+        # Phase G2 : réservations dans le MÊME dossier d'état (aucun
+        # fichier créé à la construction).
+        self.execution_claims = FileExecutionClaimRegistry(self.path.parent)
 
     @contextmanager
     def _locked(self, context: str, write: bool = False) -> Iterator[None]:
@@ -907,3 +1009,163 @@ class FileAuthorizationConsumptionRegistry:
             except OSError:
                 pass
             raise
+
+
+# ----------------------------------------------------------------------
+# Phase G2 — réservation atomique d'exécution par `request_id` (course
+# P2.16, cf. docstring de module).
+# ----------------------------------------------------------------------
+
+EXECUTION_CLAIM_SUFFIX = ".execution-claim"
+# `O_NOFOLLOW` (POSIX) : un lien symbolique posé à la place du fichier de
+# réservation est refusé à l'ouverture, jamais suivi.
+_CLAIM_OPEN_FLAGS = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _claim_busy(request_id: str, detail: str) -> ExecutionClaimBusyError:
+    return ExecutionClaimBusyError(
+        f"Execution claim for request '{request_id}' is held by another "
+        f"execution ({detail}) -- refused before any decision or provider "
+        f"call (fail closed)."
+    )
+
+
+def _claim_refused(request_id: str, path: Path, error: BaseException) -> ExecutionClaimRefusedError:
+    return ExecutionClaimRefusedError(
+        f"Execution claim for request '{request_id}' could not be acquired "
+        f"(claim file '{path}': {error}) -- refused before any decision or "
+        f"provider call (fail closed)."
+    )
+
+
+def _try_lock_claim(fd: int) -> bool:
+    """Verrou exclusif NON BLOQUANT : `True` si acquis, `False` s'il est
+    détenu par un autre descripteur. Toute autre erreur se propage."""
+
+    if os.name == "nt":
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EDEADLK):
+                return False
+            raise
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _close_claim_fd(fd: int, locked: bool) -> None:
+    if locked and os.name == "nt":
+        # Déverrouillage explicite : sous Windows, la libération implicite
+        # à la fermeture n'est pas garantie immédiate. Son échec ne doit
+        # jamais masquer l'exception du bloc : la fermeture libère quand
+        # même le verrou.
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    os.close(fd)
+
+
+def _is_claimed_file(fd: int, path: Path) -> bool:
+    """`fd` désigne-t-il le fichier régulier présent à `path` ? Faux si
+    le fichier a été supprimé ou remplacé depuis l'ouverture."""
+
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    opened = os.fstat(fd)
+    return stat.S_ISREG(opened.st_mode) and (opened.st_dev, opened.st_ino) == (
+        current.st_dev,
+        current.st_ino,
+    )
+
+
+class InMemoryExecutionClaimRegistry:
+    """
+    Phase G2 — réservations EN MÉMOIRE : exclusion entre threads d'un
+    même processus (vérification + inscription sous un verrou), AUCUNE
+    portée entre processus. Défaut du store en mémoire.
+    """
+
+    def __init__(self) -> None:
+        self._held: Set[str] = set()
+        self._guard = threading.Lock()
+
+    @contextmanager
+    def claim(self, request_id: str) -> Iterator[None]:
+        with self._guard:
+            if request_id in self._held:
+                raise _claim_busy(request_id, "held in this process")
+            self._held.add(request_id)
+        try:
+            yield
+        finally:
+            with self._guard:
+                self._held.discard(request_id)
+
+
+class FileExecutionClaimRegistry:
+    """
+    Phase G2 — un fichier `<request_id>.execution-claim` par requête dans
+    `claim_dir`, verrouillé par le système le temps du bloc `with` (cf.
+    docstring de module). Verrou vide et stable : rien n'y est écrit, il
+    n'est jamais supprimé, et le système le libère si le processus
+    s'arrête.
+    """
+
+    def __init__(self, claim_dir: Path) -> None:
+        self.claim_dir = Path(claim_dir)
+
+    @contextmanager
+    def claim(self, request_id: str) -> Iterator[None]:
+        # `request_id` validé AVANT toute construction de chemin, puis
+        # chemin confiné à `claim_dir` (comme P3.103).
+        try:
+            validate_request_id(request_id)
+            path = contained_child_path(self.claim_dir, f"{request_id}{EXECUTION_CLAIM_SUFFIX}")
+        except ValueError as error:
+            raise ExecutionClaimRefusedError(
+                f"Execution claim for request {request_id!r} refused: {error} "
+                f"-- refused before any decision or provider call (fail closed)."
+            ) from error
+
+        fd = self._acquire(request_id, path)
+        try:
+            yield
+        finally:
+            # Libération : fermeture seule, le fichier reste en place (cf.
+            # « Fichier STABLE » dans la docstring de module).
+            _close_claim_fd(fd, locked=True)
+
+    def _acquire(self, request_id: str, path: Path) -> int:
+        try:
+            self.claim_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(path), _CLAIM_OPEN_FLAGS, 0o600)
+        except OSError as error:
+            raise _claim_refused(request_id, path, error) from error
+
+        locked = False
+        try:
+            try:
+                locked = _try_lock_claim(fd)
+                claimed_file = locked and _is_claimed_file(fd, path)
+            except OSError as error:
+                raise _claim_refused(request_id, path, error) from error
+            if not locked:
+                raise _claim_busy(request_id, f"claim file '{path}' is locked")
+            if not claimed_file:
+                raise _claim_busy(
+                    request_id,
+                    f"claim file '{path}' was removed or replaced while being acquired",
+                )
+        except BaseException:
+            _close_claim_fd(fd, locked)
+            raise
+        return fd

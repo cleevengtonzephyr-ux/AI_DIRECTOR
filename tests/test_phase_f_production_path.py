@@ -1012,6 +1012,17 @@ class TestPinnedActions(unittest.TestCase):
         for path, value in _walk(ci):
             self.assertNotRegex(value, r"(?i)\bsecrets\b", path)
 
+    def test_ci_runs_the_execution_claim_tests_on_ubuntu(self):
+        # Phase G2 : seule exécution de la branche POSIX (fcntl.flock) de la
+        # réservation d'exécution ; le job Windows `tests` reste inchangé.
+        job = parse_workflow_yaml(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["posix-execution-claim"]
+        self.assertEqual(job["runs-on"], "ubuntu-24.04")
+        self.assertEqual(job["steps"][1]["with"], {"python-version": "3.14.4"})
+        self.assertEqual(
+            [step["run"] for step in job["steps"] if "run" in step],
+            ["python -m unittest tests.test_g2_atomic_execution_claim -v"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

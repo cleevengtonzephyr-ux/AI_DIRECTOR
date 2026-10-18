@@ -11,6 +11,11 @@ Contient :
 - Objectif 10 : la matrice de tests de sécurité A-L (non-régression
   P2.15, réexécutée ici pour confirmer qu'aucune correction
   éventuelle de P2.16 ne les a affaiblis).
+- Objectif 4, suite (Phase G2) : la même course, sous la réservation
+  atomique `execution_claims.claim()`, avec quatre vrais processus --
+  au niveau du store, puis par `GenerationJobService.execute()`. Le
+  détenteur garde la réservation jusqu'à ce que tous les autres aient
+  été refusés : exactement un gagnant, quel que soit l'ordonnancement.
 
 Tous les fichiers utilisés sont dans des répertoires temporaires.
 Aucun test n'appelle create_job() sur un provider réel, aucun appel
@@ -18,6 +23,7 @@ réseau Higgsfield, aucun crédit consommé.
 """
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,6 +39,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agents.executed_request_store import (
     ExecutedRequestStoreCorruptedError,
+    ExecutionClaimBusyError,
     FileExecutedRequestStore,
 )
 from agents.generation_approval_gate import (
@@ -41,7 +48,12 @@ from agents.generation_approval_gate import (
     GenerationRequest,
     RealGenerationAuthorization,
 )
-from tests.real_provider_path_fixtures import FIXTURE_MAX_COST_CREDITS_PER_REQUEST, fixture_identity_lock_for
+from tests.real_provider_path_fixtures import (
+    FIXTURE_MAX_COST_CREDITS_PER_REQUEST,
+    counting_mock_provider,
+    fixture_identity_lock_for,
+    install_create_job_probe,
+)
 from tests.authorization_content_helpers import bind_request, content_media
 from agents.generation_job_service import GenerationJobService
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
@@ -187,6 +199,168 @@ class TestObjective4_RealTwoProcessConcurrencyExperiment(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------
+# OBJECTIF 4, SUITE (Phase G2) — même course, sous la réservation
+# atomique : UN SEUL gagnant, déterministe
+# ---------------------------------------------------------------------
+
+WORKER_FLAG = "--p2-16-claim-worker"
+CLAIM_PROCESS_COUNT = 4
+_PROVIDER_READS = ("list_models", "get_model", "estimate_cost", "get_account_balance", "get_job", "wait_for_job")
+
+
+def _wait_for_go(sandbox: Path, wid: str) -> None:
+    (sandbox / f"ready-{wid}").write_text("1", encoding="utf-8")
+    while not (sandbox / "go").exists():
+        time.sleep(0.001)
+
+
+def _hold_until_others_refused(sandbox: Path, count: int) -> None:
+    """Le détenteur garde la réservation tant que les `count - 1` autres
+    processus n'ont pas tous été refusés : l'issue ne dépend d'aucun
+    ordonnancement."""
+
+    deadline = time.monotonic() + 120
+    while len(list(sandbox.glob("refused-*"))) < count - 1:
+        if time.monotonic() > deadline:
+            raise AssertionError("the other processes never reported their refusal")
+        time.sleep(0.005)
+
+
+def _claim_worker(mode, sandbox, wid, count):
+    sandbox, count = Path(sandbox), int(count)
+    state_path = sandbox / "state" / "executed_requests.json"
+
+    if mode == "store":
+        # L'expérience de l'Objectif 4, sous la réservation.
+        store = FileExecutedRequestStore(state_path)
+        _wait_for_go(sandbox, wid)
+        try:
+            with store.execution_claims.claim("005"):
+                was_executed = store.is_executed("005")
+                _hold_until_others_refused(sandbox, count)
+                if not was_executed:
+                    store.mark_executed("005", job_id=f"job-{wid}")
+            print(json.dumps({"result": "CLAIMED", "was_executed_at_read_time": was_executed}))
+        except ExecutionClaimBusyError:
+            (sandbox / f"refused-{wid}").write_text("1", encoding="utf-8")
+            print(json.dumps({"result": "ExecutionClaimBusyError"}))
+        return
+
+    # mode == "execute" : parcours de décision complet, verrou de section
+    # critique par défaut (NoOp) -- la réservation est la seule exclusion.
+    provider = counting_mock_provider(cost_per_job=10.0, available_credits=100.0, succeed_after_polls=1)
+    provider_calls = []
+    for name in _PROVIDER_READS:
+        original = getattr(provider, name)
+
+        def observed(*args, _name=name, _original=original, **kwargs):
+            provider_calls.append(_name)
+            if len(provider_calls) == 1:
+                # Premier appel Provider : seul le détenteur y parvient.
+                _hold_until_others_refused(sandbox, count)
+            return _original(*args, **kwargs)
+
+        # Mock toujours reconnu : seul `create_job` ne doit pas être remplacé.
+        setattr(provider, name, observed)
+    gate = install_create_job_probe(
+        GenerationApprovalGate(provider, executed_request_store=FileExecutedRequestStore(state_path)),
+        provider,
+    )
+    service = GenerationJobService(provider, gate)
+    _wait_for_go(sandbox, wid)
+    try:
+        service.execute(_request(real_generation_authorization=_valid_auth()), interval_seconds=0)
+        result = "EXECUTED"
+    except BaseException as error:  # noqa: B902 -- rapporté au processus parent
+        result = type(error).__name__
+        if isinstance(error, ExecutionClaimBusyError):
+            (sandbox / f"refused-{wid}").write_text("1", encoding="utf-8")
+    print(json.dumps({"result": result, "provider_calls": provider_calls, "create_calls": provider.create_calls}))
+
+
+class TestObjective4G2_AtomicClaimHasExactlyOneWinner(unittest.TestCase):
+    """
+    Quatre VRAIS processus (subprocess), libérés ensemble par un fichier
+    barrière, visent la même requête "005" dans le même dossier d'état.
+    Le détenteur de la réservation ne la rend qu'après le refus de tous
+    les autres : un second gagnant est donc impossible par construction,
+    et non simplement improbable.
+    """
+
+    def setUp(self):
+        self.sandbox = Path(tempfile.mkdtemp(prefix="p2_16_claim_"))
+        self.addCleanup(shutil.rmtree, self.sandbox, ignore_errors=True)
+        self.state_path = self.sandbox / "state" / "executed_requests.json"
+
+    def _race(self, mode):
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-B", __file__, WORKER_FLAG, mode, str(self.sandbox), str(i), str(CLAIM_PROCESS_COUNT)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for i in range(CLAIM_PROCESS_COUNT)
+        ]
+        try:
+            deadline = time.monotonic() + 120
+            while len(list(self.sandbox.glob("ready-*"))) < CLAIM_PROCESS_COUNT:
+                self.assertLess(time.monotonic(), deadline, "workers never reached the start barrier")
+                time.sleep(0.01)
+            (self.sandbox / "go").write_text("go", encoding="utf-8")
+            results = []
+            for proc in procs:
+                out, err = proc.communicate(timeout=240)
+                lines = [line for line in out.splitlines() if line.startswith("{")]
+                self.assertTrue(lines, err[-800:])
+                results.append(json.loads(lines[-1]))
+            return results
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+
+    def _assert_no_claim_left(self):
+        # Le fichier de réservation reste en place : un verrou vide, ni bail
+        # ni marqueur d'exécution, de nouveau disponible sans attente.
+        claim_files = list(self.state_path.parent.glob("*.execution-claim"))
+        self.assertEqual([path.name for path in claim_files], ["005.execution-claim"])
+        self.assertEqual(claim_files[0].stat().st_size, 0)
+        with FileExecutedRequestStore(self.state_path).execution_claims.claim("005"):
+            pass
+
+    def test_only_one_process_obtains_the_claim_and_observes_not_executed(self):
+        results = self._race("store")
+        winners = [r for r in results if r["result"] == "CLAIMED"]
+        self.assertEqual(len(winners), 1, results)
+        self.assertIs(winners[0]["was_executed_at_read_time"], False)
+        self.assertEqual(
+            [r["result"] for r in results].count("ExecutionClaimBusyError"), CLAIM_PROCESS_COUNT - 1, results
+        )
+        final_state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(list(final_state["executed_requests"]), ["005"])
+        self._assert_no_claim_left()
+
+    def test_decision_path_has_one_winner_and_refused_processes_never_reach_the_provider(self):
+        results = self._race("execute")
+        outcomes = [r["result"] for r in results]
+        self.assertEqual(outcomes.count("EXECUTED"), 1, results)
+        self.assertEqual(outcomes.count("ExecutionClaimBusyError"), CLAIM_PROCESS_COUNT - 1, results)
+        for r in results:
+            if r["result"] == "EXECUTED":
+                self.assertEqual(r["create_calls"], 1, r)
+            else:
+                self.assertEqual(r["provider_calls"], [], f"a refused process reached the provider: {r}")
+                self.assertEqual(r["create_calls"], 0, r)
+
+        store = FileExecutedRequestStore(self.state_path)
+        self.assertTrue(store.is_executed("005"))
+        self.assertFalse(store.is_unknown("005"))
+        consumed = json.loads((self.state_path.parent / "consumed_authorizations.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(consumed["consumed_authorization_sha256"]), 1, "only the winner consumes")
+        self._assert_no_claim_left()
+
+
+# ---------------------------------------------------------------------
 # OBJECTIF 10 — Matrice de sécurité A-L (non-régression P2.15)
 # ---------------------------------------------------------------------
 
@@ -327,4 +501,7 @@ class TestKL_NoRealJobNoCreditsAcrossThisModule(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) > 1 and sys.argv[1] == WORKER_FLAG:
+        _claim_worker(*sys.argv[2:])
+    else:
+        unittest.main()

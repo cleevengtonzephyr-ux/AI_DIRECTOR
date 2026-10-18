@@ -37,6 +37,23 @@ jobs:
       - name: Install locked approval-service dependencies
         run: uv sync --locked --no-dev --project approval_service
 
+  # Branche POSIX de la réservation d'exécution (fcntl.flock), que le job
+  # Windows `tests` n'exerce jamais. Bibliothèque standard uniquement.
+  posix-execution-claim:
+    name: Execution claim tests (ubuntu-24.04, Python 3.14.4)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.4"
+
+      - name: Execution claim tests (POSIX)
+        run: python -m unittest tests.test_g2_atomic_execution_claim -v
+
   tests:
     runs-on: windows-2025
     steps:
