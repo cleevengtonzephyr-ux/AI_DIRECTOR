@@ -46,6 +46,7 @@ from agents.executed_request_store import (
     FileExecutedRequestStore,
     InMemoryAuthorizationConsumptionRegistry,
     InMemoryExecutedRequestStore,
+    InMemoryExecutionClaimRegistry,
     InvalidAuthorizationIdError,
 )
 from agents.generation_approval_gate import (
@@ -644,9 +645,12 @@ class TestProcessConcurrency(_Sandbox):
         results = self._run("execute")
         self.assertEqual(results.count("OK"), 1, results)
         self.assertEqual(len(list((self.sandbox / "ledger").glob("job-*"))), 1, results)
+        # Phase G2 : un concurrent qui chevauche le gagnant est refusé dès
+        # la réservation (`ExecutionClaimBusyError`), avant toute
+        # évaluation, consommation ou appel Provider.
         for result in results:
             self.assertIn(result, {"OK", "GenerationJobExecutionError", "AuthorizationAlreadyConsumedError",
-                                   "ExecutedRequestStoreConflictError"})
+                                   "ExecutedRequestStoreConflictError", "ExecutionClaimBusyError"})
 
 
 # ----------------------------------------------------------------------
@@ -721,6 +725,11 @@ class TestFailClosed(_Sandbox):
 
     def test_store_without_registry_fails_closed(self):
         class _LegacyStore:
+            # Phase G2 : réservation requise par `execute()` (sans elle :
+            # refus avant toute évaluation) -- en mémoire ici, pour que ce
+            # test vise toujours l'absence du registre de consommation.
+            execution_claims = InMemoryExecutionClaimRegistry()
+
             def is_executed(self, request_id):
                 return False
 

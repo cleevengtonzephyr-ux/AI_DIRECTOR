@@ -80,6 +80,10 @@ processus long-vivant, la persistance est nécessaire pour que la
 protection anti-rejeu protège quoi que ce soit entre deux invocations
 réelles. Une lecture d'état corrompue échoue TOUJOURS fermée
 (BLOCKED), jamais vers APPROVED ni vers un silencieux "non exécuté".
+Phase G2 (course P2.16) : dans `GenerationJobService.execute()`, cette
+évaluation a lieu sous une réservation atomique de `request_id`
+(`claim_execution()`) : deux exécutions concurrentes ne peuvent plus
+constater ensemble « non exécuté ».
 """
 
 import hashlib
@@ -762,6 +766,28 @@ class GenerationApprovalGate:
         """
 
         return self.executed_request_store.in_flight(request_id)
+
+    def claim_execution(self, request_id: str):
+        """
+        Phase G2 (course P2.16) — context manager à prendre par
+        GenerationJobService AVANT `evaluate()` et à garder jusqu'après
+        `mark_executed()` : réservation atomique de `request_id` (cf.
+        agents/executed_request_store.py). Une seule exécution la détient ;
+        les autres sont refusées immédiatement (`ExecutionClaimBusyError`),
+        avant toute décision et tout appel Provider. Ne crée aucune
+        autorité : la décision reste celle de `evaluate()`, prise sous la
+        réservation. Store sans registre de réservations ->
+        ExecutedRequestStoreCorruptedError (fail closed).
+        """
+
+        claims = getattr(self.executed_request_store, "execution_claims", None)
+        if not callable(getattr(claims, "claim", None)):
+            raise ExecutedRequestStoreCorruptedError(
+                "executed_request_store exposes no execution claim registry "
+                "(Phase G2) -- concurrent executions of one request cannot be "
+                "excluded; failing closed."
+            )
+        return claims.claim(request_id)
 
     def _authorization_registry(self):
         """Phase B — registre de consommation du store injecté. Absent
