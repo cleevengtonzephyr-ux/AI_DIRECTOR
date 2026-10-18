@@ -232,7 +232,7 @@ Cette décision de conception évite de demander à l'approbateur de consentir �
 Il prolonge l'exigence L1 de la Phase C. Il est sérialisé en JSON à clés triées, UTF-8, empreintes en hexadécimal minuscule, et versionné. Contenu minimal :
 
 - version de l'énoncé, identifiant de la Relying Party, `approver_id` pseudonyme relié à un identifiant WebAuthn actif et `auth_method=webauthn` ;
-- `repository_id`, `repository`, `sha`, `workflow_ref`, `run_id`, `run_attempt` (issus du jeton vérifié) ;
+- `repository_id`, `repository`, `sha`, `workflow_ref`, `run_id`, `run_attempt` (issus du jeton vérifié) et, depuis la version 2 de l’énoncé, `run_actor_id`, l’identifiant numérique du compte GitHub qui a lancé le run, issu de `actor_id` (jamais le nom de connexion `actor`) ; voir l’addendum G2 sur l’énoncé version 2 ;
 - `manifest_sha256` et les champs vidéo liés : empreintes du prompt, de l'avatar et de la référence visage, `job_type`, `duration`, `resolution` et `aspect_ratio`, issus du manifeste recalculé ;
 - `request_id`, `authorization_id`, `approval_id` et nonce, tous choisis par le service et distincts. `approval_id` doit respecter le format accepté par le script de Phase F (`[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}`) ;
 - `requested_at` (création de la demande) et `approval_deadline` (= `requested_at` + 600 secondes), qui bornent l'attente humaine ;
@@ -900,6 +900,46 @@ Treize mutations temporaires font échouer ces tests, puis le fichier a été re
 - Disposer d’une seconde personne, et empêcher l’administrateur du registre d’être son propre déclencheur.
 - Confirmer `actor_id` sur un jeton réel avant de le rendre obligatoire, avec une autorisation explicite et distincte.
 - Brancher ce contrôle sur le registre durable, et décider s’il faut inclure l’acteur dans l’énoncé signé.
+
+Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
+
+Aucun jeton OIDC réel, credential réel, secret, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+### G2 — énoncé d’approbation version 2 : acteur du run signé (18 octobre 2026)
+
+**D-5 reste non résolu.** L’approbateur signe désormais l’identifiant du compte qui a lancé le run. Cela ne suffit pas à établir D-5 : la liaison administrative entre comptes et approbateurs, le contrôle des comptes et la séparation des personnes restent à établir.
+
+- **Champ ajouté (extension de L1, §4.5).** `ApprovalStatement` passe à la version 2 et ajoute un champ obligatoire, `run_actor_id`. C’est l’identifiant numérique du compte GitHub qui a lancé le run, destiné à provenir d’un `actor_id` OIDC vérifié. La règle de validation reprend l’hypothèse déjà retenue pour `actor_id` : chaîne décimale ASCII strictement positive, sans zéro initial, sans espace, signe ni caractère de contrôle. Une valeur absente ou mal formée est refusée.
+- **Pas de nom de connexion.** Le nom de connexion `actor`, renommable, n’est ni stocké ni signé : aucun champ de l’énoncé ne le porte.
+- **Liaison au défi.** `run_actor_id` fait partie des octets canoniques, de l’empreinte et donc du défi WebAuthn : un autre acteur produit un autre défi. Le domaine du défi devient `AI_DIRECTOR_APPROVAL_WEBAUTHN_V2\x00`, ce qui sépare explicitement les défis des versions 1 et 2.
+- **Version 1 non prise en charge.** `statement_version` vaut 2 et n’est pas fourni par l’appelant. Un jeu de champs v1, sans `run_actor_id`, ne construit plus d’énoncé. Le registre durable, inchangé, refuse déjà à la relecture tout énoncé stocké dont la version diffère de celle du code. Aucune migration n’est prévue, puisqu’aucune base n’est déployée.
+- **Ce qui n’a pas changé.** Le code de production du registre SQLite, son schéma, `oidc_verifier.py`, le Gate, les workflows et la consommation sont inchangés. Le registre stocke les énoncés v2 tels quels, donc avec `run_actor_id` dans le JSON canonique signé. Il n’en fait toutefois ni colonne, ni contrôle, ni usage dans une décision. La docstring du registre (« records no GitHub actor ») et le test `test_no_github_actor_is_recorded_while_d5_is_unresolved`, qui ne vérifie que le schéma, devront être précisés lors du raccordement du registre.
+- **Conséquence.** `actor_id` reste facultatif dans le vérificateur OIDC. Mais un run dont le jeton ne le porte pas ne peut pas produire d’énoncé v2. Sa présence et sa représentation dans un jeton réel restent à confirmer, avec une autorisation explicite et distincte ; aucun jeton réel n’a été demandé ni utilisé.
+
+**Ce que prouvent les tests.** `tests/test_g2_approval_statement.py` passe de 8 à 13 tests :
+
+- version 2 ;
+- `run_actor_id` présent dans les octets canoniques ; un autre acteur change les octets, l’empreinte et le défi ;
+- défi recalculé indépendamment avec le domaine `…_V2`, et différent du calcul avec `…_V1` ;
+- champ absent ou dix-neuf valeurs mal formées refusés ;
+- jeu de champs v1 refusé, et version impossible à imposer par l’appelant ;
+- aucun champ `actor`.
+
+Les fabriques d’énoncés des tests du vérificateur WebAuthn et du registre fournissent seulement le nouveau champ. Cinq mutations temporaires font échouer ces tests, puis le fichier a été restauré à l’identique :
+
+- validation retirée ;
+- zéro initial accepté ;
+- domaine laissé en V1 ;
+- version laissée à 1 ;
+- acteur exclu des octets signés.
+
+**Vérifications.** Elles ont été exécutées avec CPython 3.14.5 sous Windows, avec les dépendances verrouillées installées dans un dossier temporaire extérieur au dépôt :
+
+- énoncé : 13 tests réussis ;
+- vérificateur WebAuthn et registre : 69 tests réussis, dont deux ignorés (tests propres à POSIX) ;
+- suite complète (`python -m unittest discover -s tests -t .`) : 3 111 tests réussis, dont deux ignorés (tests propres à POSIX du registre durable) ;
+- audit d’architecture : `NO_DRIFT` ;
+- `git diff --check` : propre.
 
 Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
 
