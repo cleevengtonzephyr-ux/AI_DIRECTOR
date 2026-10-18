@@ -1023,6 +1023,29 @@ class TestPinnedActions(unittest.TestCase):
             ["python -m unittest tests.test_g2_atomic_execution_claim -v"],
         )
 
+    def test_ci_runs_the_approval_store_tests_on_ubuntu_with_locked_dependencies(self):
+        # Phase G2 : registre d'approbation SQLite sous POSIX (verrous fcntl,
+        # mémoire partagée WAL, permissions). Dépendances verrouillées avec
+        # empreintes dans le Python système, jamais via `uv run`/`uv sync`.
+        ci = parse_workflow_yaml(CI_WORKFLOW.read_text(encoding="utf-8"))
+        self.assertEqual(set(ci["jobs"]), {"dependency-preflight", "posix-execution-claim", "posix-approval-store", "tests"})
+        job = ci["jobs"]["posix-approval-store"]
+        self.assertEqual(job["runs-on"], "ubuntu-24.04")
+        self.assertEqual(job["steps"][0]["with"], {"persist-credentials": "false"})
+        self.assertEqual(job["steps"][1]["with"], {"python-version": "3.14.4"})
+        self.assertEqual(
+            [step["run"] for step in job["steps"] if "run" in step],
+            [
+                "python -m pip install --disable-pip-version-check uv==0.13.1",
+                'uv export --locked --no-dev --no-emit-project --project approval_service '
+                '--format requirements.txt --output-file "$RUNNER_TEMP/approval-requirements.txt"\n'
+                'python -m pip install --disable-pip-version-check --require-hashes --no-deps '
+                '-r "$RUNNER_TEMP/approval-requirements.txt"\n',
+                "python -m unittest tests.test_g2_approval_store -v",
+            ],
+        )
+        self.assertNotIn("shell", job["steps"][3])
+
 
 if __name__ == "__main__":
     unittest.main()
