@@ -849,3 +849,58 @@ Aucun secret, authentificateur réel, jeton, appel Higgsfield, génération ou d
 Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
 
 Aucun jeton réel, secret, service externe, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+### G2 — séparation des comptes attestée par l’administrateur (18 octobre 2026)
+
+**D-5 reste non résolu.** Cette vérification est une attestation administrative. Elle établit au mieux que le compte GitHub du run et l’approbateur sont rattachés, selon le registre, à deux principaux distincts. Elle ne prouve pas que deux personnes distinctes interviennent (D-15) et ne relie aucun credential WebAuthn à un compte GitHub.
+
+Ajout du module pur `approval_service/approval_service/account_separation.py`. `AccountSeparationChecker.check(actor_id, approver_id)` interroge un registre injecté (`SeparationRegistry`) qui associe des identifiants de comptes GitHub et des approbateurs à des principaux. Un principal représente, pour l’administrateur, une personne.
+
+- **Monde fermé.** Le registre est une attestation de l’administrateur. Tout compte, approbateur ou principal inconnu est refusé : comptes bot ou d’App, `GITHUB_TOKEN`, second compte non déclaré.
+- **Contrôles.** `actor_id` doit suivre la même hypothèse que le vérificateur OIDC (chaîne décimale strictement positive, sans zéro initial). `approver_id` doit suivre le format de l’énoncé. Le compte et l’approbateur doivent être connus, actifs et rattachés à des principaux connus et actifs. Les deux principaux doivent être distincts.
+- **Refus fermés.** Sont refusés :
+  - un identifiant absent ou mal formé ;
+  - un compte, un approbateur ou un principal inconnu ou révoqué ;
+  - une entrée incohérente : réponse pour un autre identifiant, mauvais type, liaison vers un principal inconnu ;
+  - un acteur et un approbateur rattachés au même principal ;
+  - toute erreur du registre.
+
+  Les messages sont génériques : ils ne reprennent aucun identifiant de compte, d’approbateur ou de principal. Les erreurs du registre ne sont ni chaînées ni répétées.
+- **`actor` jamais utilisé.** Seul `actor_id` intervient. Le nom de connexion `actor` n’est ni un paramètre ni une donnée lue par le module.
+- **Résultat.** `AdminAttestedAccountSeparation` est figé. Il ne contient que les deux principaux comparés et la preuve `ADMIN_ATTESTED_ACCOUNT_SEPARATION`. Son nom et sa documentation ne déclarent jamais D-5 résolu.
+- **Indépendance.** Le module n’importe que la bibliothèque standard (`re`, `dataclasses`, `typing`). Il ne dépend ni du stockage SQLite, ni du Gate, ni d’`agents/`, ni du réseau. Il n’est encore appelé par aucun code : registre SQLite, énoncé signé, vérificateur OIDC, Gate, workflows et consommation sont inchangés.
+
+**Ce que prouvent les tests.** `tests/test_g2_account_separation.py` comprend 14 tests synthétiques, avec un registre en mémoire. Ils couvrent :
+
+- le succès et l’ordre des consultations du registre ;
+- un résultat figé qui ne prétend pas davantage qu’une attestation ;
+- quatorze `actor_id` et sept `approver_id` mal formés, refusés avant toute consultation ;
+- le monde fermé ;
+- les révocations de compte, d’approbateur et des deux principaux ;
+- l’auto-approbation directe et par un second compte du principal de l’approbateur ;
+- sept incohérences du registre ;
+- quatre types d’erreur du registre sur chacune des trois consultations ;
+- l’absence d’identifiants dans les messages ;
+- la validation des entrées du registre ;
+- l’absence de `actor` dans le code, et la limitation des imports à la bibliothèque standard.
+
+Treize mutations temporaires font échouer ces tests, puis le fichier a été restauré à l’identique.
+
+**Vérifications.** Elles ont été exécutées avec CPython 3.14.5 sous Windows, avec les dépendances verrouillées installées dans un dossier temporaire extérieur au dépôt :
+
+- tests du module : 14 réussis, y compris avec le Python système seul ;
+- suite complète (`python -m unittest discover -s tests -t .`) : 3 106 tests réussis, dont deux ignorés (les tests propres à POSIX du registre durable) ;
+- audit d’architecture : `NO_DRIFT` ;
+- `git diff --check` : propre.
+
+**Ce qui reste nécessaire pour D-5.**
+
+- Décider qui administre le registre, quelle preuve est consignée lors de l’inscription d’un compte et comment le monde fermé est confronté aux comptes ayant accès au dépôt (D-15).
+- Ajouter éventuellement une preuve de contrôle du compte, par exemple une liaison OIDC dédiée.
+- Disposer d’une seconde personne, et empêcher l’administrateur du registre d’être son propre déclencheur.
+- Confirmer `actor_id` sur un jeton réel avant de le rendre obligatoire, avec une autorisation explicite et distincte.
+- Brancher ce contrôle sur le registre durable, et décider s’il faut inclure l’acteur dans l’énoncé signé.
+
+Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
+
+Aucun jeton OIDC réel, credential réel, secret, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
