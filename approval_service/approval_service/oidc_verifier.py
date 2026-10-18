@@ -96,7 +96,13 @@ class OidcPolicy:
 
 @dataclass(frozen=True, slots=True)
 class VerifiedRunIdentity:
-    """Minimal, verified claims safe to pass to the request layer."""
+    """Minimal, verified claims safe to pass to the request layer.
+
+    ``actor_id`` is the stable account ID of the run initiator when the token
+    carries it; ``actor`` is a renamable login kept for display only and never
+    used as an identity. Neither links the run to a WebAuthn approver, and G1
+    D-5 remains unresolved.
+    """
 
     repository_id: str
     repository_owner_id: str
@@ -107,6 +113,7 @@ class VerifiedRunIdentity:
     run_id: str
     run_attempt: int
     actor: str | None
+    actor_id: str | None
     token_id: str | None
 
 
@@ -193,12 +200,23 @@ class OidcVerifier:
         # The design document marks `actor` as a claim to confirm against a
         # real, explicitly authorized token. Preserve it when present without
         # making an unverified claim name a prerequisite for this mock-only
-        # verifier.
+        # verifier. It is a display value only: no identity decision uses it.
         actor = claims.get("actor")
         if actor is not None and (
             type(actor) is not str or not actor or actor.strip() != actor
         ):
             raise OidcVerificationError("OIDC actor is malformed")
+        # GitHub documents `actor_id` as the ID of the personal account that
+        # initiated the run; its official example is a string such as "12".
+        # Accepting only a positive decimal string without a leading zero is
+        # this module's assumption. Neither that representation nor the
+        # claim's presence in a real token is confirmed, so it stays optional;
+        # once present, any other value (null included) is refused.
+        actor_id = None
+        if "actor_id" in claims:
+            actor_id = claims["actor_id"]
+            if type(actor_id) is not str or _DECIMAL.fullmatch(actor_id) is None:
+                raise OidcVerificationError("OIDC actor ID is malformed")
         token_id = claims.get("jti")
         if token_id is not None and (type(token_id) is not str or not token_id or token_id.strip() != token_id):
             raise OidcVerificationError("OIDC token identifier is malformed")
@@ -213,5 +231,6 @@ class OidcVerifier:
             run_id=run_id,
             run_attempt=run_attempt,
             actor=actor,
+            actor_id=actor_id,
             token_id=token_id,
         )

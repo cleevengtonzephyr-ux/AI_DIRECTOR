@@ -823,3 +823,29 @@ Le job Ubuntu n’a pas pu être exécuté localement, faute de WSL et de Docker
 - **D-5 :** non résolu, comme indiqué plus haut.
 
 Aucun secret, authentificateur réel, jeton, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+### G2 — extraction facultative de `actor_id` OIDC (18 octobre 2026)
+
+**D-5 reste non résolu.** Cette étape ajoute seulement un identifiant de compte à l’identité du run vérifiée. Elle ne relie ce compte à aucun approbateur ni à aucun credential WebAuthn, et ne prouve pas que deux personnes distinctes interviennent.
+
+- **Champ ajouté.** `VerifiedRunIdentity` porte désormais `actor_id`. Trois éléments sont à distinguer :
+  - **Ce qu’affirme la documentation de GitHub :** `actor_id` est l’identifiant du compte personnel qui a initié le run.
+  - **Ce que montre l’exemple officiel :** une valeur sous forme de chaîne, par exemple `"12"`. Un exemple n’est pas une spécification de format.
+  - **Hypothèse de cette implémentation :** seule une chaîne décimale strictement positive, sans zéro initial, est acceptée. Sont refusés le signe, l’espace, le chiffre non ASCII et tout autre caractère. Cette règle étend l’exemple officiel ; elle n’est pas énoncée par GitHub.
+- **À confirmer avant de rendre `actor_id` obligatoire.** Ni cette représentation ni la présence du claim dans un jeton réel n’ont été vérifiées : aucun jeton réel n’a été demandé ni utilisé. Si un jeton réel montrait une autre représentation, cette implémentation le refuserait (échec fermé) et l’hypothèse devrait être revue avant toute utilisation.
+- **Facultatif.** `actor_id` ne fait pas partie des claims obligatoires. S’il est absent, le champ vaut `None`. S’il est présent, toute valeur qui ne suit pas l’hypothèse ci-dessus fait refuser le jeton, y compris `null`, un nombre JSON ou une liste. Le message est générique et ne reprend pas la valeur.
+- **`actor` n’est pas une identité.** Ce nom de connexion, renommable, est conservé pour l’affichage seulement. Aucune décision d’identité ne l’utilise et il ne remplace jamais un `actor_id` absent, même s’il ne contient que des chiffres.
+- **`run_attempt` inchangé.** La politique existante, qui n’accepte que la première tentative, est conservée telle quelle. Elle n’est pas présentée comme une conséquence de la sémantique de `actor_id`.
+- **Tests synthétiques.** `tests/test_g2_oidc_verifier.py` passe de 11 à 15 tests. Les jetons sont signés avec des clés RSA générées localement. Les tests couvrent : valeurs décimales valides ; absence du claim ; vingt formes invalides ; indépendance vis-à-vis de `actor` (identifiant de connexion renommé, identifiant de connexion numérique sans `actor_id`, `actor_id` sans `actor`). Quatre mutations temporaires font échouer ces tests : `null` traité comme une absence, format non vérifié, identifiant de connexion numérique pris pour l’identité, champ abandonné. Le fichier a été restauré à l’identique.
+- **Inchangés.** Le registre SQLite, l’énoncé d’approbation, le Gate, les workflows et les dépendances ne changent pas. Aucun lien n’est créé entre un credential et un compte GitHub.
+
+**Ce qui reste nécessaire pour D-5.**
+
+- Confirmer sur un jeton réel la présence de `actor_id` et sa représentation, avant de rendre ce claim obligatoire. Cet essai exige une autorisation explicite et distincte du propriétaire.
+- Choisir la racine de confiance de la liaison entre comptes GitHub et approbateurs : registre administré hors bande, et éventuellement preuve de contrôle du compte.
+- Exiger que tout compte capable de déclencher un run soit inscrit dans ce registre.
+- Admettre que cette liaison établit au mieux une séparation des comptes, pas une séparation des personnes (D-15). Une seconde personne reste nécessaire.
+
+Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
+
+Aucun jeton réel, secret, service externe, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
