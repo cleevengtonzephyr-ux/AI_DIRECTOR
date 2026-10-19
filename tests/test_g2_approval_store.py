@@ -42,6 +42,7 @@ if str(APPROVAL_SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(APPROVAL_SERVICE_ROOT))
 
 import approval_service.approval_store as store_module
+from approval_service.account_separation import AccountBinding
 from approval_service.approval_statement import ApprovalStatement
 from approval_service.approval_store import (
     APPLICATION_ID,
@@ -62,8 +63,14 @@ ISSUED_AT = REQUESTED_AT + 1_000
 EXPIRES_AT = REQUESTED_AT + 301_000
 NOW = ISSUED_AT + 10_000
 APPROVER_ID = "approver-pseudonym-1"
+OTHER_APPROVER_ID = "approver-pseudonym-2"
+ACTOR_ID = "12"
+ACTOR_PRINCIPAL = "principal-dispatcher"
+APPROVER_PRINCIPAL = "principal-approver"
+OTHER_PRINCIPAL = "principal-other"
 USER_HANDLE = b"synthetic-approver-handle-1"
 FAST_BUSY_TIMEOUT = 0.2
+SEPARATION_REFUSED = "account separation between the run and the approver is not established"
 
 
 def _statement(n=1, **overrides) -> ApprovalStatement:
@@ -114,6 +121,55 @@ def _new_credential(label: str) -> _Credential:
         Aaguid.NONE, credential_id, ES256.from_cryptography_key(private_key.public_key())
     )
     return _Credential(credential_id, private_key, data)
+
+
+def _seed_registry(db_path, *, principals=(), approvers=(), accounts=()):
+    """Test-only administrator attestation: registry rows written directly.
+
+    ``principals``: principal IDs; ``approvers``: (approver_id, principal_id);
+    ``accounts``: (account_id, principal_id). Every row starts ACTIVE.
+    """
+
+    connection = sqlite3.connect(db_path)
+    try:
+        with connection:
+            for principal_id in principals:
+                connection.execute("INSERT INTO principals (principal_id, state) VALUES (?, 'ACTIVE')", (principal_id,))
+            for approver_id, principal_id in approvers:
+                connection.execute(
+                    "INSERT INTO approvers (approver_id, principal_id, state) VALUES (?, ?, 'ACTIVE')",
+                    (approver_id, principal_id),
+                )
+            for account_id, principal_id in accounts:
+                connection.execute(
+                    "INSERT INTO github_accounts (account_id, principal_id, evidence, attested_at_ms, state)"
+                    " VALUES (?, ?, 'ADMIN_ATTESTED', ?, 'ACTIVE')",
+                    (account_id, principal_id, REQUESTED_AT),
+                )
+    finally:
+        connection.close()
+
+
+def _seed_default_registry(db_path):
+    _seed_registry(
+        db_path,
+        principals=(ACTOR_PRINCIPAL, APPROVER_PRINCIPAL, OTHER_PRINCIPAL),
+        approvers=((APPROVER_ID, APPROVER_PRINCIPAL), (OTHER_APPROVER_ID, OTHER_PRINCIPAL)),
+        accounts=((ACTOR_ID, ACTOR_PRINCIPAL),),
+    )
+
+
+def _revoke(db_path, table, key_column, key, at_ms=NOW):
+    """Test-only revocation: the store itself has no revocation path for the registry."""
+
+    connection = sqlite3.connect(db_path)
+    try:
+        with connection:
+            connection.execute(
+                f"UPDATE {table} SET state = 'REVOKED', revoked_at_ms = ? WHERE {key_column} = ?", (at_ms, key)
+            )
+    finally:
+        connection.close()
 
 
 def _seed_credential(
@@ -257,13 +313,26 @@ class _StoreTestCase(unittest.TestCase):
         self.db_path = self.sandbox / "approvals.sqlite3"
         self.clock = _Clock()
         self.store = ApprovalStore.initialize(self.db_path, self.clock, busy_timeout_seconds=FAST_BUSY_TIMEOUT)
+        _seed_default_registry(self.db_path)
 
-    def _rows(self, sql, params=()):
-        connection = sqlite3.connect(self.db_path)
+    def _rows(self, sql, params=(), db_path=None):
+        connection = sqlite3.connect(self.db_path if db_path is None else db_path)
         try:
             return connection.execute(sql, params).fetchall()
         finally:
             connection.close()
+
+    def _tamper(self, approval_id, **columns):
+        """Bypass the protecting triggers and restore them, as an attacker with file access could."""
+
+        names = ("approval_requests_statement_immutable", "approval_requests_transitions")
+        triggers = [self._rows("SELECT sql FROM sqlite_schema WHERE name = ?", (name,))[0][0] for name in names]
+        assignments = ", ".join(f"{name} = ?" for name in columns)
+        self._write(
+            *((f"DROP TRIGGER {name}", ()) for name in names),
+            (f"UPDATE approval_requests SET {assignments} WHERE approval_id = ?", (*columns.values(), approval_id)),
+            *((sql, ()) for sql in triggers),
+        )
 
     def _write(self, *statements):
         """Direct SQL in one all-or-nothing transaction, as a process with file access could do."""
@@ -311,7 +380,7 @@ class _StoreTestCase(unittest.TestCase):
 
 
 class TestInitializationAndOpening(_StoreTestCase):
-    def test_initialize_creates_a_private_wal_schema_version_1(self):
+    def test_initialize_creates_a_private_wal_schema_version_2(self):
         connection = sqlite3.connect(self.db_path)
         try:
             pragmas = {
@@ -321,10 +390,14 @@ class TestInitializationAndOpening(_StoreTestCase):
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
         finally:
             connection.close()
+        self.assertEqual(SCHEMA_VERSION, 2)
         self.assertEqual(
             pragmas, {"application_id": APPLICATION_ID, "user_version": SCHEMA_VERSION, "journal_mode": "wal"}
         )
-        self.assertEqual(tables, {"store_meta", "credentials", "approval_requests", "journal"})
+        self.assertEqual(
+            tables,
+            {"store_meta", "principals", "approvers", "github_accounts", "credentials", "approval_requests", "journal"},
+        )
         self.assertEqual(self._last_observed(), 0)
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(self.db_path.stat().st_mode), 0o600)
@@ -364,9 +437,12 @@ class TestInitializationAndOpening(_StoreTestCase):
     def test_ordinary_open_refuses_unexpected_identity_version_mode_or_objects(self):
         changes = {
             "application_id": ["PRAGMA application_id = 1"],
-            "user_version": ["PRAGMA user_version = 2"],
+            "schema version 1": ["PRAGMA user_version = 1"],
+            "schema version 3": ["PRAGMA user_version = 3"],
             "journal_mode": ["PRAGMA journal_mode = DELETE"],
             "objects": ["DROP TRIGGER approval_requests_transitions"],
+            "registry table dropped": ["DROP TABLE github_accounts"],
+            "replacement guard dropped": ["DROP TRIGGER github_accounts_never_replaced"],
             "extra table": ["CREATE TABLE extra (x INTEGER)"],
         }
         for name, statements in changes.items():
@@ -526,18 +602,6 @@ class TestApprovalAndReplay(_StoreTestCase):
 
 
 class TestStatementIntegrity(_StoreTestCase):
-    def _tamper(self, approval_id, **columns):
-        """Bypass the protecting triggers and restore them, as an attacker with file access could."""
-
-        names = ("approval_requests_statement_immutable", "approval_requests_transitions")
-        triggers = [self._rows("SELECT sql FROM sqlite_schema WHERE name = ?", (name,))[0][0] for name in names]
-        assignments = ", ".join(f"{name} = ?" for name in columns)
-        self._write(
-            *((f"DROP TRIGGER {name}", ()) for name in names),
-            (f"UPDATE approval_requests SET {assignments} WHERE approval_id = ?", (*columns.values(), approval_id)),
-            *((sql, ()) for sql in triggers),
-        )
-
     def test_altered_statement_or_digest_is_refused(self):
         statement = self._pending(1, self.credential)
         response = _response(statement, self.credential)
@@ -811,6 +875,147 @@ class TestRevocationAndTransitions(_StoreTestCase):
             ))
 
 
+class TestRowsAreNeverReplaced(_StoreTestCase):
+    def test_insert_or_replace_cannot_rewrite_existing_rows(self):
+        # REPLACE deletes the conflicting row without firing DELETE triggers;
+        # each permanent table refuses it with a BEFORE INSERT guard.
+        statement = self._pending(1, self.credential)
+        self.store.approve("approval-1", _response(statement, self.credential, sign_count=1))
+        snapshot = {table: self._rows(f"SELECT * FROM {table} ORDER BY 1") for table in TestAccountSeparation.TABLES}
+        forbidden = {
+            "approval reset to PENDING": "INSERT OR REPLACE INTO approval_requests (approval_id, request_id,"
+            " authorization_id, nonce, run_id, run_attempt, run_actor_id, approver_id, actor_principal_id,"
+            " approver_principal_id, separation_evidence, statement_json, statement_sha256, state, created_at_ms)"
+            " SELECT approval_id, request_id, authorization_id, nonce, run_id, run_attempt, run_actor_id,"
+            " approver_id, actor_principal_id, approver_principal_id, separation_evidence, statement_json,"
+            " statement_sha256, 'PENDING', created_at_ms FROM approval_requests WHERE approval_id = 'approval-1'",
+            "request replaced through its nonce": "INSERT OR REPLACE INTO approval_requests (approval_id, request_id,"
+            " authorization_id, nonce, run_id, run_attempt, run_actor_id, approver_id, actor_principal_id,"
+            " approver_principal_id, separation_evidence, statement_json, statement_sha256, state, created_at_ms)"
+            " SELECT 'approval-9', 'request-9', 'authorization-9', nonce, '9', 1, run_actor_id, approver_id,"
+            " actor_principal_id, approver_principal_id, separation_evidence, statement_json, statement_sha256,"
+            " 'PENDING', created_at_ms FROM approval_requests WHERE approval_id = 'approval-1'",
+            "credential counter reset": "INSERT OR REPLACE INTO credentials SELECT credential_id, credential_data,"
+            " approver_id, user_handle, backup_eligible, backup_state, 0, 'ACTIVE', NULL FROM credentials",
+            "journal entry rewritten": "INSERT OR REPLACE INTO journal (sequence, at_ms, event, approval_id)"
+            " VALUES (1, 1, 'REQUEST_CREATED', 'approval-x')",
+            "observed clock reset": "INSERT OR REPLACE INTO store_meta (singleton, last_observed_ms) VALUES (1, 0)",
+        }
+        for name, sql in forbidden.items():
+            with self.subTest(change=name), self.assertRaises(sqlite3.IntegrityError):
+                self._write((sql, ()))
+        self.assertEqual(
+            {table: self._rows(f"SELECT * FROM {table} ORDER BY 1") for table in TestAccountSeparation.TABLES},
+            snapshot,
+        )
+
+    def test_a_counter_signal_cannot_be_replaced_through_its_partial_unique_index(self):
+        # journal_one_counter_signal keys COUNTER_SIGNAL on (approval_id,
+        # credential_sha256): a REPLACE with a new sequence conflicts there only.
+        statement = self._pending(1, self.credential, sign_count=5)
+        response = _response(statement, self.credential, sign_count=5)
+        with self.assertRaisesRegex(ApprovalRefusedError, "signal"):
+            self.store.approve("approval-1", response)
+        credential_sha256 = hashlib.sha256(self.credential.credential_id).hexdigest()
+        journal = self._rows("SELECT * FROM journal ORDER BY sequence")
+        self.assertEqual(
+            [row[2:] for row in journal if row[2] == "COUNTER_SIGNAL"],
+            [("COUNTER_SIGNAL", "approval-1", credential_sha256, 5, 5)],
+        )
+        columns = "at_ms, event, approval_id, credential_sha256, stored_sign_count, presented_sign_count"
+        values = f"1, 'COUNTER_SIGNAL', 'approval-1', '{credential_sha256}', 0, 0"
+        forbidden = {
+            "new sequence": f"INSERT OR REPLACE INTO journal (sequence, {columns}) VALUES (1000, {values})",
+            "sequence left to SQLite": f"REPLACE INTO journal ({columns}) VALUES ({values})",
+        }
+        for name, sql in forbidden.items():
+            with self.subTest(change=name), self.assertRaises(sqlite3.IntegrityError):
+                self._write((sql, ()))
+        self.assertEqual(self._rows("SELECT * FROM journal ORDER BY sequence"), journal)
+
+        # The store still records a repeated signal once, without a failure note.
+        with self.assertRaisesRegex(ApprovalRefusedError, "signal") as context:
+            self.store.approve("approval-1", response)
+        self.assertEqual(getattr(context.exception, "__notes__", []), [])
+        self.assertEqual(self._rows("SELECT * FROM journal ORDER BY sequence"), journal)
+
+    def test_insert_or_replace_cannot_rewrite_rows_through_their_rowid(self):
+        # Tables keyed on TEXT or BLOB keep a unique rowid: REPLACE with an
+        # existing rowid and fresh keys would delete that row.
+        statement = self._pending(1, self.credential)
+        self.store.approve("approval-1", _response(statement, self.credential, sign_count=1))
+        snapshot = {
+            table: self._rows(f"SELECT rowid, * FROM {table} ORDER BY 1") for table in TestAccountSeparation.TABLES
+        }
+        forbidden = {
+            "principal": "INSERT OR REPLACE INTO principals (rowid, principal_id, state)"
+            " SELECT rowid, 'principal-new', 'ACTIVE' FROM principals WHERE principal_id = 'principal-other'",
+            "approver": "INSERT OR REPLACE INTO approvers (rowid, approver_id, principal_id, state)"
+            " SELECT rowid, 'approver-new', principal_id, 'ACTIVE' FROM approvers"
+            " WHERE approver_id = 'approver-pseudonym-2'",
+            "account": "INSERT OR REPLACE INTO github_accounts"
+            " (rowid, account_id, principal_id, evidence, attested_at_ms, state)"
+            " SELECT rowid, '99', principal_id, evidence, attested_at_ms, 'ACTIVE' FROM github_accounts",
+            "credential": "INSERT OR REPLACE INTO credentials (rowid, credential_id, credential_data, approver_id,"
+            " user_handle, backup_eligible, backup_state, sign_count, state) SELECT rowid, zeroblob(32),"
+            " credential_data, approver_id, user_handle, backup_eligible, backup_state, 0, 'ACTIVE' FROM credentials",
+            "approved request": "INSERT OR REPLACE INTO approval_requests (rowid, approval_id, request_id,"
+            " authorization_id, nonce, run_id, run_attempt, run_actor_id, approver_id, actor_principal_id,"
+            " approver_principal_id, separation_evidence, statement_json, statement_sha256, state, created_at_ms)"
+            " SELECT rowid, 'approval-9', 'request-9', 'authorization-9', 'nonce-9', '9', 1, run_actor_id,"
+            " approver_id, actor_principal_id, approver_principal_id, separation_evidence, statement_json,"
+            " statement_sha256, 'PENDING', created_at_ms FROM approval_requests WHERE approval_id = 'approval-1'",
+        }
+        for name, sql in forbidden.items():
+            with self.subTest(table=name), self.assertRaises(sqlite3.IntegrityError):
+                self._write((sql, ()))
+        self.assertEqual(
+            {table: self._rows(f"SELECT rowid, * FROM {table} ORDER BY 1") for table in TestAccountSeparation.TABLES},
+            snapshot,
+        )
+
+    def test_update_or_replace_cannot_move_rows_onto_another_rowid(self):
+        # Moving a row onto an existing rowid deletes the row already there,
+        # without DELETE triggers; each update is otherwise an allowed one.
+        _seed_registry(self.db_path, accounts=(("13", OTHER_PRINCIPAL),))
+        first = self._pending(1, self.credential)
+        _seed_credential(self.db_path, self.other_credential)
+        self._pending(2)
+        self._pending(3)
+        self.store.approve("approval-1", _response(first, self.credential, sign_count=1))
+        snapshot = {
+            table: self._rows(f"SELECT rowid, * FROM {table} ORDER BY 1") for table in TestAccountSeparation.TABLES
+        }
+
+        def onto(table, condition):
+            return f"UPDATE OR REPLACE {table} SET rowid = (SELECT rowid FROM {table} WHERE {condition})"
+
+        forbidden = {
+            "principal": onto("principals", "principal_id = 'principal-dispatcher'")
+            + " WHERE principal_id = 'principal-other'",
+            "approver": onto("approvers", "approver_id = 'approver-pseudonym-1'")
+            + " WHERE approver_id = 'approver-pseudonym-2'",
+            "account": onto("github_accounts", "account_id = '12'") + " WHERE account_id = '13'",
+            "credential": onto("credentials", f"credential_id = x'{self.credential.credential_id.hex()}'")
+            + f" WHERE credential_id = x'{self.other_credential.credential_id.hex()}'",
+            "pending request expired onto the APPROVED one": onto("approval_requests", "approval_id = 'approval-1'")
+            + ", state = 'EXPIRED', closed_at_ms = 1 WHERE approval_id = 'approval-2'",
+            "APPROVED request revoked onto a pending one": onto("approval_requests", "approval_id = 'approval-3'")
+            + ", state = 'REVOKED', closed_at_ms = 1 WHERE approval_id = 'approval-1'",
+        }
+        for name, sql in forbidden.items():
+            with self.subTest(change=name), self.assertRaises(sqlite3.IntegrityError):
+                self._write((sql, ()))
+        self.assertEqual(
+            {table: self._rows(f"SELECT rowid, * FROM {table} ORDER BY 1") for table in TestAccountSeparation.TABLES},
+            snapshot,
+        )
+        self.assertEqual(
+            self._rows("SELECT approval_id, state FROM approval_requests ORDER BY approval_id"),
+            [("approval-1", "APPROVED"), ("approval-2", "PENDING"), ("approval-3", "PENDING")],
+        )
+
+
 # ----------------------------------------------------------------------
 # Clock
 # ----------------------------------------------------------------------
@@ -1025,6 +1230,251 @@ class TestContention(_StoreTestCase):
 
 
 # ----------------------------------------------------------------------
+# Administrator-attested account separation (schema version 2)
+# ----------------------------------------------------------------------
+
+
+class TestAccountSeparation(_StoreTestCase):
+    TABLES = ("store_meta", "principals", "approvers", "github_accounts", "credentials", "approval_requests", "journal")
+
+    def _snapshot(self, db_path=None):
+        return {table: self._rows(f"SELECT * FROM {table} ORDER BY 1", db_path=db_path) for table in self.TABLES}
+
+    def assertSeparationRefused(self, call):
+        with self.assertRaises(ApprovalRefusedError) as context:
+            call()
+        self.assertEqual(str(context.exception), SEPARATION_REFUSED)
+        self.assertIsNone(context.exception.__cause__)
+        return context.exception
+
+    def test_creation_persists_the_signed_actor_and_distinct_principals(self):
+        self._pending(1)
+
+        self.assertEqual(
+            self._rows(
+                "SELECT run_actor_id, approver_id, actor_principal_id, approver_principal_id, separation_evidence"
+                " FROM approval_requests"
+            ),
+            [(ACTOR_ID, APPROVER_ID, ACTOR_PRINCIPAL, APPROVER_PRINCIPAL, "ADMIN_ATTESTED_ACCOUNT_SEPARATION")],
+        )
+        stored = json.loads(self._rows("SELECT statement_json FROM approval_requests")[0][0])
+        self.assertEqual(stored["run_actor_id"], ACTOR_ID)
+        self.assertNotIn("actor", stored)
+        self.assertEqual(self._journal(), [("REQUEST_CREATED", "approval-1", None, None, None)])
+
+    def test_unknown_or_revoked_accounts_approvers_and_principals_refuse_creation_without_any_write(self):
+        _seed_registry(
+            self.db_path,
+            principals=("principal-revoked-actor", "principal-revoked-approver"),
+            approvers=(("approver-revoked", APPROVER_PRINCIPAL), ("approver-of-revoked", "principal-revoked-approver")),
+            accounts=(("21", ACTOR_PRINCIPAL), ("22", "principal-revoked-actor")),
+        )
+        _revoke(self.db_path, "github_accounts", "account_id", "21")
+        _revoke(self.db_path, "approvers", "approver_id", "approver-revoked")
+        _revoke(self.db_path, "principals", "principal_id", "principal-revoked-actor")
+        _revoke(self.db_path, "principals", "principal_id", "principal-revoked-approver")
+        cases = {
+            "unknown account (bot, app or undeclared)": {"run_actor_id": "41898282"},
+            "revoked account": {"run_actor_id": "21"},
+            "account of a revoked principal": {"run_actor_id": "22"},
+            "unknown approver": {"approver_id": "approver-pseudonym-9"},
+            "revoked approver": {"approver_id": "approver-revoked"},
+            "approver of a revoked principal": {"approver_id": "approver-of-revoked"},
+        }
+        before = self._snapshot()
+        for name, overrides in cases.items():
+            with self.subTest(case=name):
+                self.assertSeparationRefused(lambda: self.store.create_request(_statement(1, **overrides)))
+                self.assertEqual(self._snapshot(), before)
+
+    def test_the_same_principal_is_refused_including_through_a_second_account(self):
+        _seed_registry(
+            self.db_path, approvers=(("approver-self", ACTOR_PRINCIPAL),), accounts=(("13", APPROVER_PRINCIPAL),)
+        )
+        before = self._snapshot()
+        cases = {
+            "approver of the run account's principal": {"approver_id": "approver-self"},
+            "second account of the approver's principal": {"run_actor_id": "13"},
+        }
+        for name, overrides in cases.items():
+            with self.subTest(case=name):
+                self.assertSeparationRefused(lambda: self.store.create_request(_statement(1, **overrides)))
+                self.assertEqual(self._snapshot(), before)
+
+    def test_an_inconsistent_or_unavailable_registry_refuses_without_writes_or_leaks(self):
+        def unavailable(registry, account_id):
+            raise sqlite3.OperationalError(f"disk I/O error reading {account_id} of {ACTOR_PRINCIPAL}")
+
+        def another_account(registry, account_id):
+            return AccountBinding("99", ACTOR_PRINCIPAL, revoked=False)
+
+        def another_principal(registry, account_id):
+            return AccountBinding(account_id, "principal-unknown", revoked=False)
+
+        before = self._snapshot()
+        cases = {"unavailable": unavailable, "another account": another_account, "unknown principal": another_principal}
+        for name, replacement in cases.items():
+            with self.subTest(case=name), mock.patch.object(store_module._RegistryRows, "resolve_account", replacement):
+                error = self.assertSeparationRefused(lambda: self.store.create_request(_statement(1)))
+                self.assertTrue(error.__suppress_context__)
+                self.assertEqual(self._snapshot(), before)
+
+    def test_a_revocation_between_creation_and_approval_is_refused_and_keeps_the_request_pending(self):
+        cases = {
+            "run account": ("github_accounts", "account_id", ACTOR_ID),
+            "approver": ("approvers", "approver_id", APPROVER_ID),
+            "run account principal": ("principals", "principal_id", ACTOR_PRINCIPAL),
+            "approver principal": ("principals", "principal_id", APPROVER_PRINCIPAL),
+        }
+        for name, (table, column, key) in cases.items():
+            with self.subTest(revoked=name):
+                db_path = self.sandbox / f"revoked-{table}-{key}.sqlite3"
+                store = ApprovalStore.initialize(db_path, self.clock, busy_timeout_seconds=FAST_BUSY_TIMEOUT)
+                _seed_default_registry(db_path)
+                _seed_credential(db_path, self.credential)
+                statement = _statement(1)
+                store.create_request(statement)
+                _revoke(db_path, table, column, key)
+                before = self._snapshot(db_path)
+
+                self.assertSeparationRefused(lambda: store.approve("approval-1", _response(statement, self.credential)))
+
+                self.assertEqual(self._snapshot(db_path), before)
+                self.assertEqual(
+                    self._rows("SELECT state FROM approval_requests", db_path=db_path), [("PENDING",)]
+                )
+
+    def test_a_revocation_after_approval_does_not_cascade_in_this_increment(self):
+        statement = self._pending(1, self.credential)
+        self.store.approve("approval-1", _response(statement, self.credential))
+        _revoke(self.db_path, "github_accounts", "account_id", ACTOR_ID)
+
+        # Documented limit: a future consumption must re-validate the separation.
+        self.assertEqual(self._state("approval-1"), "APPROVED")
+        self.assertSeparationRefused(lambda: self.store.create_request(_statement(2)))
+
+    def test_persisted_separation_and_actor_must_match_the_statement_and_current_registry(self):
+        _seed_registry(self.db_path, accounts=(("14", ACTOR_PRINCIPAL),))
+        statement = self._pending(1, self.credential)
+        response = _response(statement, self.credential)
+        cases = {
+            "actor principal": ({"actor_principal_id": OTHER_PRINCIPAL}, "account separation record"),
+            "approver principal": ({"approver_principal_id": OTHER_PRINCIPAL}, "account separation record"),
+            "run account": ({"run_actor_id": "14"}, "statement failed its integrity check"),
+        }
+        original = self._rows(
+            "SELECT actor_principal_id, approver_principal_id, run_actor_id FROM approval_requests"
+        )[0]
+        for name, (columns, reason) in cases.items():
+            with self.subTest(case=name):
+                self._tamper("approval-1", **columns)
+                try:
+                    with self.assertRaisesRegex(ApprovalStoreUnavailableError, reason):
+                        self.store.approve("approval-1", response)
+                    self.assertEqual(self._state("approval-1"), "PENDING")
+                finally:
+                    self._tamper(
+                        "approval-1",
+                        actor_principal_id=original[0],
+                        approver_principal_id=original[1],
+                        run_actor_id=original[2],
+                    )
+        self.store.approve("approval-1", response)
+
+    def test_registry_rows_are_permanent_immutable_never_reactivated_nor_replaced(self):
+        _seed_registry(self.db_path, accounts=(("21", OTHER_PRINCIPAL),))
+        _revoke(self.db_path, "github_accounts", "account_id", "21")
+        _revoke(self.db_path, "approvers", "approver_id", OTHER_APPROVER_ID)
+        _revoke(self.db_path, "principals", "principal_id", OTHER_PRINCIPAL)
+        account = (
+            "INSERT INTO github_accounts (account_id, principal_id, evidence, attested_at_ms, state) VALUES "
+        )
+        forbidden = {
+            "principal deleted": "DELETE FROM principals WHERE principal_id = 'principal-dispatcher'",
+            "principal renamed": "UPDATE principals SET principal_id = 'principal-x'"
+            " WHERE principal_id = 'principal-dispatcher'",
+            "principal reactivated": "UPDATE principals SET state = 'ACTIVE', revoked_at_ms = NULL"
+            " WHERE principal_id = 'principal-other'",
+            "principal replaced": "INSERT OR REPLACE INTO principals (principal_id, state)"
+            " VALUES ('principal-other', 'ACTIVE')",
+            "malformed principal ID": "INSERT INTO principals (principal_id, state) VALUES (' principal', 'ACTIVE')",
+            "approver deleted": "DELETE FROM approvers WHERE approver_id = 'approver-pseudonym-1'",
+            "approver rebound": "UPDATE approvers SET principal_id = 'principal-dispatcher'"
+            " WHERE approver_id = 'approver-pseudonym-1'",
+            "approver reactivated": "UPDATE approvers SET state = 'ACTIVE', revoked_at_ms = NULL"
+            " WHERE approver_id = 'approver-pseudonym-2'",
+            "approver replaced": "REPLACE INTO approvers (approver_id, principal_id, state)"
+            " VALUES ('approver-pseudonym-1', 'principal-dispatcher', 'ACTIVE')",
+            "account deleted": "DELETE FROM github_accounts WHERE account_id = '12'",
+            "account rebound": "UPDATE github_accounts SET principal_id = 'principal-approver' WHERE account_id = '12'",
+            "account evidence changed": "UPDATE github_accounts SET evidence = 'SELF_DECLARED' WHERE account_id = '12'",
+            "account reactivated": "UPDATE github_accounts SET state = 'ACTIVE', revoked_at_ms = NULL"
+            " WHERE account_id = '21'",
+            "revoked account re-registered elsewhere": account
+            + "('21', 'principal-approver', 'ADMIN_ATTESTED', 1, 'ACTIVE')",
+            "revoked account replaced elsewhere": "INSERT OR REPLACE INTO github_accounts"
+            " (account_id, principal_id, evidence, attested_at_ms, state)"
+            " VALUES ('21', 'principal-approver', 'ADMIN_ATTESTED', 1, 'ACTIVE')",
+            "active account replaced": "REPLACE INTO github_accounts"
+            " (account_id, principal_id, evidence, attested_at_ms, state)"
+            " VALUES ('12', 'principal-approver', 'ADMIN_ATTESTED', 1, 'ACTIVE')",
+            "zero-padded account ID": account + "('012', 'principal-dispatcher', 'ADMIN_ATTESTED', 1, 'ACTIVE')",
+            "login used as account ID": account + "('octocat', 'principal-dispatcher', 'ADMIN_ATTESTED', 1, 'ACTIVE')",
+            "unattested account": account + "('31', 'principal-dispatcher', 'SELF_DECLARED', 1, 'ACTIVE')",
+        }
+        for name, sql in forbidden.items():
+            with self.subTest(change=name), self.assertRaises(sqlite3.IntegrityError):
+                self._write((sql, ()))
+        self.assertEqual(
+            self._rows("SELECT account_id, principal_id, state FROM github_accounts ORDER BY account_id"),
+            [(ACTOR_ID, ACTOR_PRINCIPAL, "ACTIVE"), ("21", OTHER_PRINCIPAL, "REVOKED")],
+        )
+
+    def test_foreign_keys_bind_credentials_requests_and_registry_rows(self):
+        stranger = _new_credential("synthetic-credential-stranger")
+        request = (
+            "INSERT INTO approval_requests (approval_id, request_id, authorization_id, nonce, run_id, run_attempt,"
+            " run_actor_id, approver_id, actor_principal_id, approver_principal_id, separation_evidence,"
+            " statement_json, statement_sha256, state, created_at_ms) VALUES ('a-x', 'r-x', 'z-x', 'n-x', '1', 1,"
+            " ?, ?, 'principal-dispatcher', 'principal-approver', 'ADMIN_ATTESTED_ACCOUNT_SEPARATION', x'00', ?,"
+            " 'PENDING', 1)"
+        )
+        cases = {
+            "credential of an unknown approver": (
+                "INSERT INTO credentials (credential_id, credential_data, approver_id, user_handle, backup_eligible,"
+                " backup_state, sign_count, state) VALUES (?, ?, 'approver-unknown', ?, 0, 0, 0, 'ACTIVE')",
+                (stranger.credential_id, bytes(stranger.data), USER_HANDLE),
+            ),
+            "request for an unknown approver": (request, (ACTOR_ID, "approver-unknown", "0" * 64)),
+            "request from an unregistered account": (request, ("99", APPROVER_ID, "0" * 64)),
+            "approver of an unknown principal": (
+                "INSERT INTO approvers (approver_id, principal_id, state)"
+                " VALUES ('approver-x', 'principal-unknown', 'ACTIVE')",
+                (),
+            ),
+            "account of an unknown principal": (
+                "INSERT INTO github_accounts (account_id, principal_id, evidence, attested_at_ms, state)"
+                " VALUES ('31', 'principal-unknown', 'ADMIN_ATTESTED', 1, 'ACTIVE')",
+                (),
+            ),
+        }
+        for name, (sql, params) in cases.items():
+            with self.subTest(case=name):
+                connection = sqlite3.connect(self.db_path, autocommit=True)
+                try:
+                    connection.execute("PRAGMA foreign_keys = ON")
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute(sql, params)
+                finally:
+                    connection.close()
+
+        # Written with foreign keys off, a dangling binding makes every open fail closed.
+        self._write(cases["account of an unknown principal"])
+        with self.assertRaisesRegex(ApprovalStoreUnavailableError, "foreign key"):
+            ApprovalStore(self.db_path, self.clock)
+
+
+# ----------------------------------------------------------------------
 # Scope boundaries
 # ----------------------------------------------------------------------
 
@@ -1038,20 +1488,41 @@ class TestScopeBoundaries(_StoreTestCase):
             public, {"initialize", "create_request", "approve", "expire_request", "revoke_credential"}
         )
 
-    def test_the_store_module_has_no_credential_enrollment_path(self):
-        self.assertIsNone(re.search(r"(?i)insert\s+(or\s+\w+\s+)?into\s+credentials", self.SOURCE))
+    def test_the_store_module_has_no_enrollment_or_registry_administration_path(self):
+        registry_tables = r"(credentials|principals|approvers|github_accounts)\b"
+        self.assertIsNone(re.search(r"(?i)insert\s+(or\s+\w+\s+)?into\s+" + registry_tables, self.SOURCE))
+        administration = r"(?i)(update|delete\s+from)\s+(principals|approvers|github_accounts)\b"
+        self.assertIsNone(re.search(administration, self.SOURCE))
         names = {
             node.name
             for node in ast.walk(ast.parse(self.SOURCE))
             if isinstance(node, (ast.FunctionDef, ast.ClassDef))
         }
+        administration_names = r"(?i)enrol|register|add_|insert|attest|revoke_(account|approver|principal)"
         for name in names:
-            self.assertIsNone(re.search(r"(?i)enrol|regist|add_cred|insert", name), name)
+            self.assertIsNone(re.search(administration_names, name), name)
 
-    def test_no_github_actor_is_recorded_while_d5_is_unresolved(self):
+    def test_the_signed_account_id_is_persisted_and_checked_without_any_login_while_d5_stays_unresolved(self):
+        tables = [name for (name,) in self._rows("SELECT name FROM sqlite_schema WHERE type = 'table'")]
+        columns = {table: [row[1] for row in self._rows(f"PRAGMA table_info({table})")] for table in tables}
+        self.assertIn("run_actor_id", columns["approval_requests"])
+        self.assertIn("account_id", columns["github_accounts"])
+        for table, names in columns.items():
+            for name in names:
+                with self.subTest(table=table, column=name):
+                    self.assertNotEqual(name, "actor")
+                    self.assertNotIn("login", name)
         schema = " ".join(sql for (sql,) in self._rows("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL"))
-        self.assertNotIn("actor", schema.lower())
         self.assertNotIn("consume", schema.lower())
+
+        self._pending(1)
+        self.assertEqual(self._rows("SELECT run_actor_id FROM approval_requests"), [(ACTOR_ID,)])
+        with self.assertRaisesRegex(ApprovalRefusedError, SEPARATION_REFUSED):
+            self.store.create_request(_statement(2, run_actor_id="41898282"))
+
+        doc = " ".join((store_module.__doc__ or "").split())
+        self.assertIn("G1 D-5 is unresolved", doc)
+        self.assertIn("does not prove that two different people are involved", doc)
 
     def test_the_journal_never_holds_raw_credential_ids_or_assertion_material(self):
         statement = self._pending(1, self.credential, sign_count=2)
@@ -1069,8 +1540,18 @@ class TestScopeBoundaries(_StoreTestCase):
             response["response"]["signature"],
             response["response"]["clientDataJSON"],
             response["response"]["authenticatorData"],
+            ACTOR_PRINCIPAL,
+            APPROVER_PRINCIPAL,
         ):
             self.assertNotIn(secret_like, stored)
+        # No journal column can hold an account or principal ID.
+        self.assertEqual(
+            [row[1] for row in self._rows("PRAGMA table_info(journal)")],
+            [
+                "sequence", "at_ms", "event", "approval_id",
+                "credential_sha256", "stored_sign_count", "presented_sign_count",
+            ],
+        )
 
 
 if __name__ == "__main__":

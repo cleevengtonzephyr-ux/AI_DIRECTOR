@@ -944,3 +944,105 @@ Les fabriques d’énoncés des tests du vérificateur WebAuthn et du registre f
 Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
 
 Aucun jeton OIDC réel, credential réel, secret, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+### G2 — registre durable v2 : séparation des comptes raccordée (18 octobre 2026)
+
+**D-5 reste non résolu.** Le registre durable contrôle désormais, à la création comme à l’approbation, que le compte GitHub du run et l’approbateur sont rattachés à des principaux distincts. Ce contrôle repose sur l’attestation de l’administrateur. Il ne prouve pas que deux personnes distinctes interviennent. Le processus d’administration, la preuve de contrôle des comptes et la présence d’une seconde personne restent à établir.
+
+- **Schéma version 2.** `SCHEMA_VERSION` vaut 2. Aucune base n’étant déployée, aucune migration n’existe : une base v1, une autre version ou des objets de schéma différents sont refusés à l’ouverture. Trois tables STRICT sont ajoutées :
+  - `principals` : identifiant, état `ACTIVE`/`REVOKED`, date de révocation ;
+  - `approvers` : identifiant, principal (clé étrangère), état, date de révocation ;
+  - `github_accounts` : `account_id`, principal, preuve `ADMIN_ATTESTED`, date d’attestation, état, date de révocation. `account_id` suit l’hypothèse retenue pour `actor_id` : chaîne décimale strictement positive, sans zéro initial.
+- **Contraintes.**
+  - Identifiants et rattachements sont immuables, et aucune ligne ne peut être supprimée.
+  - Un état `REVOKED` ne change plus : aucune réactivation n’est possible.
+  - Une ligne existante ne peut être ni réinsérée ni remplacée. Un compte révoqué ne peut donc pas être réinscrit sous un autre principal.
+  - Clés étrangères : un credential pointe vers son approbateur ; une demande pointe vers son approbateur, le compte du run et les deux principaux.
+- **Demande.** `approval_requests` conserve désormais :
+  - `run_actor_id`, égal au champ signé de l’énoncé v2 et revérifié à chaque relecture ;
+  - `actor_principal_id` et `approver_principal_id`, qui doivent être distincts ;
+  - `separation_evidence = 'ADMIN_ATTESTED_ACCOUNT_SEPARATION'`.
+
+  Le déclencheur d’immuabilité de l’énoncé couvre aussi ces colonnes.
+- **Contrôles.** `AccountSeparationChecker` est réutilisé avec un résolveur privé. Celui-ci lit les tables par la connexion de la transaction `BEGIN IMMEDIATE` en cours.
+  - `create_request()` vérifie la séparation à partir du `run_actor_id` de l’énoncé, dans la transaction de création. Tout refus laisse la base inchangée.
+  - `approve()` revérifie, dans sa transaction et avant la vérification WebAuthn, l’état actuel des comptes, des approbateurs et des principaux. Le résultat doit correspondre aux principaux enregistrés à la création.
+  - Une liaison révoquée entre la création et l’approbation entraîne un refus. La demande reste alors `PENDING` jusqu’à son expiration.
+  - Toute divergence avec les principaux enregistrés est traitée comme une erreur d’intégrité.
+  - Les refus du contrôle, y compris les erreurs SQLite, deviennent un refus unique et générique : « account separation between the run and the approver is not established ». Ce message ne contient aucun identifiant ni détail SQLite.
+- **Pas de cascade.** Une révocation postérieure à l’approbation ne touche pas une demande `APPROVED`. Toute future consommation devra donc revalider la séparation, pour tenir compte d’éventuelles révocations.
+- **Pas d’administration.** Le registre n’expose aucune méthode d’inscription, d’attestation ou de révocation. Les tests préparent et révoquent les entrées par SQL direct dans leurs bases temporaires. Une administration authentifiée (D-2, D-9) reste à concevoir.
+- **Journal.** Ses colonnes sont inchangées : il ne reçoit aucun identifiant de compte ni de principal.
+- **Correction des protections existantes.** Un `INSERT OR REPLACE` supprime la ligne en conflit sans activer les déclencheurs `BEFORE DELETE`, sauf si `recursive_triggers` est actif. Dans le schéma v1, il pouvait ainsi :
+  - remettre une demande `APPROVED` à l’état `PENDING` ;
+  - remettre à zéro le compteur d’un credential ;
+  - réécrire une entrée du journal ou l’horloge observée.
+
+  Le schéma v2 ajoute à chaque table permanente un déclencheur `BEFORE INSERT`. Il refuse toute insertion qui entrerait en conflit avec une ligne existante :
+  - par sa clé primaire ou une contrainte `UNIQUE` ;
+  - par son `rowid`. Les tables dont la clé primaire n’est pas un `INTEGER PRIMARY KEY` (`principals`, `approvers`, `github_accounts`, `credentials`, `approval_requests`) gardent un `rowid` unique, qu’un `INSERT OR REPLACE` peut fournir explicitement ;
+  - pour le journal, par l’index unique partiel `journal_one_counter_signal` : un seul `COUNTER_SIGNAL` par couple (`approval_id`, `credential_sha256`), quel que soit le `sequence`.
+
+  Un `UPDATE OR REPLACE` qui déplace une ligne vers le `rowid` d’une autre supprime aussi cette autre ligne, sans activer les déclencheurs `BEFORE DELETE`. Les clés déclarées sont déjà immuables, mais pas le `rowid` caché. Chacune des cinq tables concernées reçoit donc un déclencheur `BEFORE UPDATE` qui refuse tout changement de `rowid`, quel que soit l’alias employé (`rowid`, `oid`, `_rowid_`), avant toute suppression. Dans `store_meta` et le journal, le `rowid` est la clé `INTEGER PRIMARY KEY`, que les déclencheurs existants empêchent déjà de modifier (horloge monotone, journal en ajout seul).
+
+  **Complément du 19 octobre 2026.** La première version du garde ne couvrait, pour le journal, que `sequence`, ignorait le `rowid` partout, et aucun déclencheur ne figeait le `rowid` lors d’une mise à jour. Trois remplacements restaient donc possibles, reproduits dans une base temporaire :
+  - un `INSERT OR REPLACE` avec un nouveau `sequence`, ou sans `sequence`, remplaçait le signal de compteur d’origine ;
+  - un `rowid` explicite à l’insertion supprimait la ligne visée, par exemple une demande `APPROVED` ou un principal révoqué ;
+  - un `UPDATE OR REPLACE` qui changeait le `rowid` d’une ligne supprimait celle qui l’occupait déjà, par exemple une demande `APPROVED`, même quand la mise à jour était par ailleurs une transition autorisée.
+
+  Après correction, ces insertions et ces mises à jour sont refusées et les lignes d’origine restent intactes. Toutes les voies par `rowid` ont ensuite été essayées sur les sept tables permanentes : `INSERT OR REPLACE`, `UPDATE OR REPLACE`, upsert `ON CONFLICT DO UPDATE` et `UPDATE` simple, avec les trois alias. Les 46 tentatives sont refusées, sans aucune modification. Un `VACUUM`, qui peut renuméroter ces `rowid`, ne supprime ni ne remplace aucune ligne. Le déclencheur d’insertion s’exécute avant toute clause `ON CONFLICT`. `_append_journal` vérifie donc lui-même si le signal existe déjà et ne l’ajoute pas une seconde fois : un signal répété reste enregistré une seule fois, sans note d’échec.
+
+**Ce que prouvent les tests.** `tests/test_g2_approval_store.py` passe de 46 à 59 tests. Le registre par défaut est rempli par SQL direct dans chaque base temporaire. Les nouveaux tests couvrent :
+
+- une création valide, avec les colonnes enregistrées ;
+- des refus sans écriture : compte inconnu (bot, App ou compte non déclaré), compte révoqué, compte d’un principal révoqué, approbateur inconnu, révoqué ou rattaché à un principal révoqué ;
+- le même principal, directement ou par un second compte ;
+- un registre incohérent ou indisponible, sans écriture ni fuite d’identifiant ;
+- la révocation de chacune des quatre liaisons entre la création et l’approbation ;
+- l’absence de cascade après approbation ;
+- la falsification des colonnes enregistrées ;
+- dix-neuf modifications interdites du registre : suppression, réécriture, réactivation, réinscription, remplacement, formats ;
+- les clés étrangères ;
+- cinq remplacements interdits dans les tables existantes ;
+- le remplacement d’un signal de compteur par l’index partiel du journal, avec un nouveau `sequence` ou sans `sequence`, puis l’enregistrement unique d’un signal répété, sans note d’échec ;
+- le remplacement par `rowid` explicite dans les cinq tables dont la clé primaire n’est pas un `INTEGER PRIMARY KEY` ;
+- le déplacement par `UPDATE OR REPLACE` vers le `rowid` d’une autre ligne dans ces cinq tables, dont une demande `PENDING` déplacée sur une demande `APPROVED`, et une demande `APPROVED` révoquée puis déplacée sur une demande `PENDING`.
+
+Le test qui affirmait qu’aucun acteur GitHub n’était enregistré est remplacé. Il vérifie désormais trois choses : l’identifiant de compte signé est enregistré et contrôlé ; aucune colonne ne contient de nom de connexion ; D-5 reste déclaré non résolu. Les gardes structurels refusent toute insertion, mise à jour ou suppression du registre dans le module. Les refus des bases v1, d’une autre version, d’une table ou d’un déclencheur manquants s’ajoutent aux refus existants. Les tests de concurrence ne changent pas.
+
+Quinze mutations temporaires font échouer ces tests. Elles visent :
+
+- l’acceptation d’un refus à la création ;
+- le contrôle de l’approbation ou la comparaison aux principaux enregistrés, retirés ;
+- la colonne `run_actor_id` non comparée ;
+- les comptes ou principaux révoqués lus comme actifs ;
+- la réactivation possible ;
+- le remplacement possible des comptes ou des demandes ;
+- le rattachement d’un approbateur modifiable ;
+- le format des comptes non contrôlé ;
+- le garde du journal limité à `sequence` ;
+- le `rowid` retiré des gardes d’insertion ;
+- le déclencheur d’immuabilité du `rowid` neutralisé ;
+- la vérification préalable d’un signal de compteur répété, retirée.
+
+Après chaque essai, le fichier a été restauré à l’identique.
+
+**Vérifications.** Elles ont été exécutées avec CPython 3.14.5 sous Windows, avec les dépendances verrouillées installées dans un dossier temporaire extérieur au dépôt :
+
+- registre : 59 tests réussis, dont deux ignorés (tests propres à POSIX) ;
+- suite complète (`python -m unittest discover -s tests -t .`) : 3 124 tests réussis, dont deux ignorés (tests propres à POSIX du registre durable) ;
+- audit d’architecture : `NO_DRIFT` ;
+- `git diff --check` : propre.
+
+Le job Ubuntu `posix-approval-store` exécutera ce module sous Linux ; il n’a pas pu être lancé localement.
+
+**Limites restantes.**
+
+- La séparation est attestée par l’administrateur, pas prouvée. Un administrateur qui serait aussi déclencheur pourrait créer un faux principal.
+- Les déclencheurs restent des conventions renforcées : un processus qui peut écrire le fichier peut les contourner (§4.9).
+- Il n’y a ni cascade de révocation, ni administration authentifiée, ni consommation.
+- La présence de `actor_id` dans un jeton réel reste à confirmer, avec une autorisation explicite et distincte.
+
+Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
+
+Aucune migration, aucun point d’accès d’administration, aucun jeton OIDC réel, credential réel, secret, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
