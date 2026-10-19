@@ -121,7 +121,7 @@ from agents.release_candidate_identity_lock import (
 )
 from integrations.higgsfield.errors import HiggsfieldError
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
-from integrations.higgsfield.provider import BaseHiggsfieldProvider, HiggsfieldProvider
+from integrations.higgsfield.provider import BaseHiggsfieldProvider, HiggsfieldProvider, provider_closed_reasons
 from integrations.higgsfield.types import MediaReference
 
 # Durées EMPIRIQUEMENT confirmées par lecture seule (Phase P1.2,
@@ -465,6 +465,19 @@ class GenerationApprovalGate:
         Évalue une demande de génération et retourne une décision
         typée. Ne crée et n'appelle JAMAIS de job.
         """
+
+        # Provider = CLOSED : sur le chemin réel (Provider adossé au vrai
+        # client, cf. `provider_closed_reasons()` dans provider.py), BLOCKED
+        # avant toute validation (Identity Lock compris), donc avant tout
+        # appel au Provider -- `get_model()` de la validation inclus.
+        closed_reasons = provider_closed_reasons(self.provider)
+        if closed_reasons:
+            return GenerationApprovalResult(
+                decision=GenerationApprovalDecision.BLOCKED,
+                request_id=request.request_id,
+                job_type=request.job_type,
+                reasons=closed_reasons,
+            )
 
         validation_errors = self._validate(request)
 

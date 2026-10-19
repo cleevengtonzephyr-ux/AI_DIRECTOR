@@ -155,32 +155,17 @@ class AIDirector:
         self.higgsfield = HiggsfieldClient()
 
     def check_higgsfield(self):
-        """Check that the Higgsfield connector is operational."""
-        try:
-            workflows = self.higgsfield.list_workflows()
+        """Report the Higgsfield connector as closed, without contacting it.
 
-            video_workflows = [
-                workflow
-                for workflow in workflows
-                if workflow.get("type") == "video"
-            ]
-
-            cinema_40 = any(
-                workflow.get("job_type") == "cinematic_studio_video_4_0"
-                for workflow in video_workflows
-            )
-
-            return {
-                "connected": True,
-                "video_workflows": len(video_workflows),
-                "cinema_4_available": cinema_40,
-            }
-
-        except Exception as error:
-            return {
-                "connected": False,
-                "error": str(error),
-            }
+        While Provider = CLOSED (docs/phase_a_real_generation_decision.md),
+        no entry point of the repository launches the Higgsfield CLI, not
+        even a read-only command: this check never uses `self.higgsfield`.
+        """
+        return {
+            "connected": False,
+            "provider": "CLOSED",
+            "reason": "Provider = CLOSED (NO-GO): the Higgsfield CLI is not contacted, not even read-only.",
+        }
 
     def _build_default_chain(self) -> _DefaultChain:
         """
@@ -611,16 +596,8 @@ class AIDirector:
 
         result = self.check_higgsfield()
 
-        if result["connected"]:
-            print("Higgsfield   : CONNECTED")
-            print(f"Video models : {result['video_workflows']}")
-            print(
-                "Cinema 4.0   : "
-                + ("AVAILABLE" if result["cinema_4_available"] else "NOT FOUND")
-            )
-        else:
-            print("Higgsfield   : ERROR")
-            print(f"Error        : {result['error']}")
+        print(f"Higgsfield   : {result['provider']}")
+        print(f"Detail       : {result['reason']}")
 
         print("Claude       : READY FOR INTEGRATION")
         print("=" * 60)

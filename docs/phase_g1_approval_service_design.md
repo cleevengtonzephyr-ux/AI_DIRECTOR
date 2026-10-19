@@ -1116,6 +1116,14 @@ Le job Ubuntu `posix-approval-store` exécutera ce module sous Linux ; il n’a 
 - Le journal n’est ni chaîné ni ancré.
 - La présence de `actor_id` dans un jeton réel reste à confirmer, avec une autorisation explicite et distincte.
 
+**Décision du propriétaire (19 octobre 2026) : aucune seconde personne disponible.** Aucune seconde personne B n’est actuellement disponible pour être approbatrice.
+
+- D-5 reste non résolu.
+- Aucune genèse du registre et aucune consommation d’approbation ne sont autorisées tant qu’une seconde personne réelle, distincte du propriétaire, n’a pas été désignée.
+- Aucun principal fictif, aucun mode à une personne et aucun contournement dégradé ne doit être introduit. Un second principal ou un second compte contrôlé par le propriétaire ne satisfait pas la séparation humaine de D-5 (§4.12).
+- Une preuve P-1 de contrôle d’un compte GitHub ne prouverait pas la séparation des personnes. Elle établirait au mieux que le titulaire d’un compte a pu lancer un workflow à un instant donné, sans identifier la personne ni montrer que deux personnes distinctes interviennent.
+- La conception et l’implémentation de l’administration et de l’inscription du registre attendront cette désignation. Cela couvre la frontière d’administration, la genèse, la séparation entre administrateur et approbateurs, la confirmation des ajouts par un autre principal, la preuve P-1, les invitations et la confirmation WebAuthn des opérations d’administration.
+
 Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
 
 Aucune migration, aucune interface d’administration, aucun jeton OIDC réel, credential réel, secret, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.

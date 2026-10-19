@@ -1,8 +1,16 @@
 """
-AI DIRECTOR — Transport HTTPS réel pour l'API REST Higgsfield (Phase F)
+AI DIRECTOR — Transport HTTPS de l'API REST Higgsfield (Phase F) -- FERMÉ.
 
-Seul module du chemin REST qui ouvre une connexion réseau. Avant toute
-connexion, `send()` refuse, dans cet ordre :
+Provider = CLOSED : ce module n'ouvre AUCUNE connexion, pas même pour une
+requête en lecture seule (`status`), et n'importe aucun module réseau.
+`send()` valide la requête puis lève toujours
+`HiggsfieldRealGenerationDisabledError` ; aucune autre méthode ne mène à
+un échange HTTP. Aucune variable, option ni configuration (pas même des
+faits d'API injectés comme CONFIRMED) ne rouvre l'envoi : une réouverture
+exige une décision écrite et une étape distinctes
+(docs/phase_a_real_generation_decision.md), qui réintroduirait l'échange.
+
+Avant ce refus final, `send()` refuse, dans cet ordre :
 1. toute opération hors de `READ_ONLY_REST_OPERATIONS` (soumission,
    annulation, upload : verrou F-4, indépendant des verrous F-1 à F-3 du
    client) ;
@@ -11,24 +19,21 @@ connexion, `send()` refuse, dans cet ordre :
 3. toute requête dont la méthode, le chemin ou la présence d'un corps ne
    correspond pas EXACTEMENT au gabarit de son opération
    (`OPERATION_ROUTES`) : l'étiquette `operation` ne suffit jamais à
-   choisir ce qui est envoyé. Une opération sans gabarit (`estimate`,
+   choisir ce qui serait envoyé. Une opération sans gabarit (`estimate`,
    dont aucun endpoint n'est connu) est refusée ;
 4. tout en-tête mal formé ou réservé.
 
-Hôte fixe (`platform.higgsfield.ai`), HTTPS avec vérification TLS par
-défaut (contexte de la bibliothèque standard), délai obligatoire, aucune redirection suivie, aucun proxy lu dans
-l'environnement. Les identifiants sont injectés (`HiggsfieldApiCredentials`)
-et n'apparaissent que dans l'en-tête ajouté au moment de l'envoi : jamais
-dans `HttpRequest`, un `repr`, un message d'erreur ou un journal.
+Les identifiants sont injectés (`HiggsfieldApiCredentials`) et validés ;
+ils ne sont jamais affichés, comparés, sérialisés ni utilisés tant que le
+transport est fermé.
 """
 
-import http.client
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping, Optional
+from typing import Mapping, NoReturn
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -37,15 +42,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.rest_api import (
-    API_HOST,
     HIGGSFIELD_REST_FACTS,
     READ_ONLY_REST_OPERATIONS,
     ApiFact,
     HiggsfieldApiSpecUnconfirmedError,
     HttpRequest,
-    HttpResponse,
-    TransportAmbiguousError,
-    TransportNotSentError,
     operation_blockers,
 )
 
@@ -71,7 +72,6 @@ OPERATION_ROUTES: Mapping[str, RouteTemplate] = MappingProxyType({
 })
 
 _SAFE_HEADER_VALUE = re.compile(r"[\x20-\x7e]{0,512}")
-_MAX_RESPONSE_BYTES = 1024 * 1024
 
 
 class HiggsfieldApiCredentials:
@@ -115,14 +115,14 @@ class HttpsTransport:
             raise TypeError("credentials must be HiggsfieldApiCredentials")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not 0 < timeout_seconds <= 300:
             raise ValueError("timeout_seconds must be a number in (0, 300]")
-        self._credentials = credentials
-        self._timeout = float(timeout_seconds)
+        # Identifiants et délai sont validés mais jamais conservés : fermé, le
+        # transport n'en a aucun usage.
         self._facts = facts
 
-    def send(self, request: HttpRequest) -> HttpResponse:
+    def send(self, request: HttpRequest) -> NoReturn:
         if not isinstance(request, HttpRequest) or request.operation not in READ_ONLY_REST_OPERATIONS:
             raise HiggsfieldRealGenerationDisabledError(
-                "HttpsTransport only sends read-only operations (Phase F lock F-4): "
+                "HttpsTransport only accepts read-only operations (Phase F lock F-4): "
                 "submission, cancellation and upload are refused before any connection.",
                 reasons=[f"rest_operation_not_read_only: {getattr(request, 'operation', None)!r}"],
             )
@@ -144,38 +144,14 @@ class HttpsTransport:
                 f"Request does not match the closed route template of operation {request.operation!r}: nothing is sent.",
                 reasons=[f"rest_route_not_allowed: {request.operation!r}"],
             )
-        headers = {}
         for name, value in request.headers:
             if name.lower() == "authorization" or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", name) or not _SAFE_HEADER_VALUE.fullmatch(value):
                 raise ValueError("request header is malformed or reserved")
-            headers[name] = value
-        headers["Authorization"] = self._credentials.authorization_header()
-        return self._exchange(request, headers)
-
-    def _exchange(self, request: HttpRequest, headers: dict) -> HttpResponse:
-        # Sans `context` explicite, `HTTPSConnection` applique le contexte TLS
-        # par défaut de la bibliothèque standard : certificat et nom d'hôte
-        # vérifiés. `ssl` n'est pas importé ici (garde de la Phase C).
-        connection = http.client.HTTPSConnection(API_HOST, timeout=self._timeout)
-        try:
-            try:
-                connection.connect()
-            except (OSError, http.client.HTTPException) as error:
-                raise TransportNotSentError(
-                    f"connection to the Higgsfield API was not established ({type(error).__name__})"
-                ) from None
-            try:
-                connection.request(request.method, request.path, body=request.body or None, headers=headers)
-                response = connection.getresponse()
-                body = response.read(_MAX_RESPONSE_BYTES + 1)
-            except (OSError, http.client.HTTPException) as error:
-                # `from None` : la cause d'origine pourrait citer des en-têtes.
-                raise TransportAmbiguousError(
-                    f"transport failure after the request may have been sent ({type(error).__name__})"
-                ) from None
-            if len(body) > _MAX_RESPONSE_BYTES:
-                raise TransportAmbiguousError("response body exceeds the accepted size")
-            # Une redirection n'est jamais suivie : son statut est rendu tel quel.
-            return HttpResponse(status=response.status, body=body)
-        finally:
-            connection.close()
+        # Provider = CLOSED : aucune connexion, même pour une requête en
+        # lecture seule valide. Aucun échange HTTP n'existe dans ce module.
+        raise HiggsfieldRealGenerationDisabledError(
+            "HttpsTransport.send() opens no connection while Provider = CLOSED: "
+            "not even a read-only request is sent. Reopening requires a separate "
+            "written decision and step (docs/phase_a_real_generation_decision.md).",
+            reasons=[f"provider_closed_no_https_connection: {request.operation!r}"],
+        )

@@ -1,11 +1,13 @@
 """
 Phase F — chemin de production REST Higgsfield, fermé.
 
-Tests mock-only : aucun réseau (toute connexion HTTPS est remplacée par un
-objet qui échoue le test), aucun secret, aucun crédit, aucun accès au
-`state/` réel. Vérifient le manifeste, l'idempotence, la classification
-fermée des réponses, les verrous F-1 à F-4, le journal d'audit, le script
-du workflow et le workflow lui-même.
+Tests mock-only : aucun réseau (`no_egress()` remplace toute connexion
+HTTP(S)/socket et tout lancement de processus par une sentinelle qui
+enregistre et refuse), aucun secret, aucun crédit, aucun accès au `state/`
+réel. Vérifient le manifeste, l'idempotence, la classification fermée des
+réponses, les verrous F-1 à F-4, la fermeture du transport HTTPS
+(Provider = CLOSED : aucune connexion, même en lecture seule), le journal
+d'audit, le script du workflow et le workflow lui-même.
 """
 
 import ast
@@ -18,7 +20,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -67,6 +68,7 @@ from integrations.higgsfield.rest_api import (
 )
 from integrations.higgsfield.types import JobStatus
 from scripts import higgsfield_production_run as run_script
+from tests.provider_closure_helpers import no_egress
 from tests.strict_workflow_yaml import UnsupportedWorkflowYamlError, parse_workflow_yaml
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
@@ -75,19 +77,7 @@ WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "higgsfield-production.yml"
 CONFIRMED_FACTS = {name: ApiFact(fact.value, FactStatus.CONFIRMED) for name, fact in HIGGSFIELD_REST_FACTS.items()}
 
 
-class _NoNetwork:
-    """Remplace `http.client.HTTPSConnection` : toute construction échoue le test."""
-
-    instances = 0
-
-    def __init__(self, *args, **kwargs):
-        type(self).instances += 1
-        raise AssertionError("a network connection was attempted")
-
-
-def no_network():
-    _NoNetwork.instances = 0
-    return mock.patch.object(https_transport.http.client, "HTTPSConnection", _NoNetwork)
+PROVIDER_CLOSED_STATUS = "provider_closed_no_https_connection: 'status'"
 
 
 class _RecordingTransport:
@@ -346,11 +336,12 @@ class TestLocks(_Workspace):
     def test_f4_https_transport_refuses_mutating_operations_before_any_connection(self):
         credentials = HiggsfieldApiCredentials("id", "secret")
         transport = HttpsTransport(credentials, 30, facts=CONFIRMED_FACTS)
-        with no_network():
+        with no_egress() as egress:
             for operation, method in (("submit", "POST"), ("cancel", "POST"), ("upload", "POST"), ("other", "GET")):
-                with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+                with self.assertRaises(HiggsfieldRealGenerationDisabledError) as raised:
                     transport.send(HttpRequest(operation, method, "/x"))
-        self.assertEqual(_NoNetwork.instances, 0)
+                self.assertEqual(raised.exception.reasons, [f"rest_operation_not_read_only: {operation!r}"])
+        self.assertEqual(egress, [])
 
     def test_allowed_operation_label_cannot_carry_another_method_path_or_body(self):
         """Même avec tous les faits confirmés, l'étiquette `status` n'ouvre que GET /requests/<id>/status sans corps."""
@@ -373,82 +364,71 @@ class TestLocks(_Workspace):
             HttpRequest("status", "GET", "/requests/r-1/status", body=b"{}"),
             HttpRequest("estimate", "POST", "/seedance_2_0", body=submit.body),
         )
-        with no_network():
+        with no_egress() as egress:
             for request in disguised:
-                with self.assertRaises(HiggsfieldRealGenerationDisabledError, msg=request):
+                with self.assertRaises(HiggsfieldRealGenerationDisabledError, msg=request) as raised:
                     transport.send(request)
-        self.assertEqual(_NoNetwork.instances, 0)
+                self.assertNotEqual(raised.exception.reasons, [PROVIDER_CLOSED_STATUS], request)
+        self.assertEqual(egress, [])
         self.assertEqual(set(https_transport.OPERATION_ROUTES), {"status"})
         with self.assertRaises(TypeError):
             https_transport.OPERATION_ROUTES["submit"] = https_transport.OPERATION_ROUTES["status"]
 
     def test_https_transport_refuses_read_only_operations_while_facts_are_unconfirmed(self):
         transport = HttpsTransport(HiggsfieldApiCredentials("id", "secret"), 30)
-        with no_network():
+        with no_egress() as egress:
             for request in (HiggsfieldRestClient().build_status_request("r-1"), HttpRequest("estimate", "POST", "/x")):
                 with self.assertRaises(HiggsfieldApiSpecUnconfirmedError):
                     transport.send(request)
             with self.assertRaises(HiggsfieldApiSpecUnconfirmedError):
                 HiggsfieldRestClient(transport).get_status("r-1")
-        self.assertEqual(_NoNetwork.instances, 0)
+        self.assertEqual(egress, [])
 
-    def test_https_transport_sends_a_confirmed_read_only_request_with_fake_connection(self):
-        sent = {}
-
-        class FakeConnection:
-            def __init__(self, host, **kwargs):
-                sent.update(host=host, kwargs=kwargs)
-
-            def connect(self):
-                pass
-
-            def request(self, method, path, body=None, headers=None):
-                sent.update(method=method, path=path, headers=headers)
-
-            def getresponse(self):
-                return mock.Mock(status=200, read=lambda n: b'{"status":"queued"}')
-
-            def close(self):
-                sent["closed"] = True
-
-        transport = HttpsTransport(HiggsfieldApiCredentials("kid", "ksecret"), 30, facts=CONFIRMED_FACTS)
-        with mock.patch.object(https_transport.http.client, "HTTPSConnection", FakeConnection):
-            observation = HiggsfieldRestClient(transport).get_status("r-1")
-        self.assertIs(observation.status, JobStatus.QUEUED)
-        self.assertEqual(sent["host"], "platform.higgsfield.ai")
-        self.assertEqual(sent["kwargs"], {"timeout": 30.0})
-        self.assertEqual((sent["method"], sent["path"]), ("GET", "/requests/r-1/status"))
-        self.assertEqual(sent["headers"]["Authorization"], "Key kid:ksecret")
-        self.assertTrue(sent["closed"])
-
-    def test_https_transport_maps_connection_failures(self):
-        class Refused:
-            def __init__(self, *a, **k):
-                pass
-
-            def connect(self):
-                raise ConnectionRefusedError("Key kid:ksecret")
-
-            def close(self):
-                pass
-
-        class Reset(Refused):
-            def connect(self):
-                pass
-
-            def request(self, *a, **k):
-                raise TimeoutError()
+    def test_https_transport_refuses_a_confirmed_read_only_request_without_any_connection(self):
+        """Provider = CLOSED : même la requête `status` canonique, avec tous les
+        faits confirmés, est refusée après validation, sans aucune connexion."""
 
         transport = HttpsTransport(HiggsfieldApiCredentials("kid", "ksecret"), 30, facts=CONFIRMED_FACTS)
         request = HiggsfieldRestClient().build_status_request("r-1")
-        with mock.patch.object(https_transport.http.client, "HTTPSConnection", Refused):
-            with self.assertRaises(TransportNotSentError) as raised:
+        self.assertEqual((request.method, request.path), ("GET", "/requests/r-1/status"))
+        with no_egress() as egress:
+            with self.assertRaises(HiggsfieldRealGenerationDisabledError) as raised:
                 transport.send(request)
-        self.assertNotIn("ksecret", str(raised.exception))
-        self.assertIsNone(raised.exception.__cause__)
-        with mock.patch.object(https_transport.http.client, "HTTPSConnection", Reset):
-            with self.assertRaises(TransportAmbiguousError):
-                transport.send(request)
+            self.assertEqual(raised.exception.reasons, [PROVIDER_CLOSED_STATUS])
+            with self.assertRaises(HiggsfieldRealGenerationDisabledError) as through_client:
+                HiggsfieldRestClient(transport).get_status("r-1")
+            self.assertEqual(through_client.exception.reasons, [PROVIDER_CLOSED_STATUS])
+        self.assertEqual(egress, [])
+        for error in (raised.exception, through_client.exception):
+            self.assertNotIn("ksecret", str(error))
+            self.assertIsNone(error.__cause__)
+
+    def test_https_transport_holds_no_connection_code_and_no_credentials(self):
+        """Remplace le test de correspondance des échecs de connexion : fermé, le
+        transport n'a plus d'échange HTTP, n'importe aucun module réseau et ne
+        conserve ni identifiants ni délai."""
+
+        path = PROJECT_ROOT / "integrations" / "higgsfield" / "https_transport.py"
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+        imported = {alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+        imported |= {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+        self.assertFalse(imported & {"http", "socket", "ssl", "urllib", "requests", "httpx", "subprocess"}, imported)
+        self.assertFalse(hasattr(https_transport, "http"))
+        self.assertFalse(hasattr(HttpsTransport, "_exchange"))
+        self.assertEqual(
+            sorted(name for name, value in vars(HttpsTransport).items() if callable(value) and not name.startswith("__")),
+            ["send"],
+        )
+
+        send = _function(path, "HttpsTransport", "send")
+        self.assertIsInstance(send.body[-1], ast.Raise)
+        self.assertEqual(send.body[-1].exc.func.id, "HiggsfieldRealGenerationDisabledError")
+        self.assertIn("provider_closed_no_https_connection", ast.unparse(send.body[-1]))
+        self.assertFalse([node for node in ast.walk(send) if isinstance(node, (ast.Return, ast.Try))])
+
+        transport = HttpsTransport(HiggsfieldApiCredentials("kid", "ksecret"), 30, facts=CONFIRMED_FACTS)
+        self.assertEqual(set(vars(transport)), {"_facts"})
+        self.assertFalse(any(isinstance(value, HiggsfieldApiCredentials) for value in vars(transport).values()))
 
     def test_credentials_are_never_shown(self):
         credentials = HiggsfieldApiCredentials("kid", "ksecret")
@@ -634,8 +614,9 @@ class TestRunScript(unittest.TestCase):
 
     def run_main(self, *argv):
         output = io.StringIO()
-        with no_network(), contextlib.redirect_stdout(output):
+        with no_egress() as egress, contextlib.redirect_stdout(output):
             code = run_script.main(list(argv))
+        self.assertEqual(egress, [])
         return code, output.getvalue()
 
     def execute(self, digest, attempt="1", approval="gh-42", new_journal=True):

@@ -1,13 +1,14 @@
 """
 AI DIRECTOR — higgsfield:check (Phase N, MASTER PROMPT V2, Priorité 6)
 
-Vérification de connectivité Higgsfield en LECTURE SEULE (compte,
-workflows). Ne crée jamais de job, ne consomme aucun crédit.
+Affiche l'état du connecteur Higgsfield SANS le contacter : tant que
+Provider = CLOSED, aucun point d'entrée du dépôt ne lance la CLI
+Higgsfield, pas même une commande en lecture seule. Ne crée jamais de
+job, ne consomme aucun crédit, n'ouvre aucune connexion.
 
-Ce script se contente d'appeler AIDirector.status()/check_higgsfield()
-(V1, inchangés) — aucune nouvelle logique n'est introduite ici, il ne
-fait que documenter/nommer un point d'entrée déjà existant et déjà
-sûr, comme demandé par la Priorité 6 de la roadmap.
+Ce script se contente d'appeler AIDirector.status()/check_higgsfield(),
+qui rapportent l'état fermé sans utiliser le client Higgsfield
+(tests/test_provider_egress_closure.py).
 
 Usage :
     python scripts/higgsfield_check.py

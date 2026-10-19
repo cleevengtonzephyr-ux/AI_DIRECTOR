@@ -109,7 +109,7 @@ class ExecuteCallSiteCardinalityTests(unittest.TestCase):
 
         self.assertEqual(
             set(generate_call_sites),
-            {("agents/video_agent.py", 237), ("director.py", 595)},
+            {("agents/video_agent.py", 237), ("director.py", 580)},
         )
 
 

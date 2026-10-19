@@ -11,15 +11,23 @@ Priorité désormais :
   2. `HIGGSFIELD_CLI_PATH` (chemin absolu d'un fichier existant) ;
   3. `%APPDATA%\\npm\\higgsfield.cmd` (Windows uniquement).
 Une source présente mais invalide ne retombe jamais sur la suivante.
-Tous les contrôles P3.92 de `run()` restent appliqués ; un interpréteur de
-commandes (cmd.exe, PowerShell) désigné comme CLI est refusé.
+Tous les contrôles P3.92 restent appliqués par la validation pure
+(`build_argv()`) ; un interpréteur de commandes (cmd.exe, PowerShell)
+désigné comme CLI est refusé.
 
-`subprocess.run` est systématiquement remplacé : aucun lancement réel du
-CLI Higgsfield, aucun réseau, aucun `create_job()`, aucun crédit.
+Provider = CLOSED : même une CLI valide n'est jamais lancée -- `run()`
+valide puis refuse toujours. Les anciens tests de normalisation des erreurs
+de lancement (OSError, timeout, code de sortie) n'ont plus d'objet : ils sont
+remplacés par la vérification qu'aucun lancement n'est tenté et que le refus
+de fermeture n'est jamais converti en erreur de commande.
+
+Chaque test tourne sous `no_egress()`, qui enregistre et refuse tout
+lancement de processus ou toute connexion (l'enregistrement doit rester
+vide) : aucun CLI Higgsfield, aucun réseau, aucun `create_job()`, aucun
+crédit.
 """
 
 import os
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -40,14 +48,14 @@ from agents.generation_approval_gate import (
 from integrations.higgsfield import client as client_mod
 from integrations.higgsfield.client import HIGGSFIELD_CLI_ENV_VAR, HiggsfieldClient
 from integrations.higgsfield.errors import (
-    HiggsfieldAuthenticationError,
     HiggsfieldCLINotFoundError,
     HiggsfieldCommandError,
-    HiggsfieldInvalidResponseError,
     HiggsfieldRealGenerationDisabledError,
-    HiggsfieldTimeoutError,
 )
 from integrations.higgsfield.provider import HiggsfieldProvider
+from tests.provider_closure_helpers import NoEgressTestCase
+
+PROVIDER_CLOSED = "provider_closed_no_cli_process"
 
 _FAKE_NPM_SHIM = (
     '@ECHO off\n'
@@ -62,12 +70,6 @@ _READ_ONLY_CALLS = (
 )
 
 
-class _Completed:
-    returncode = 0
-    stdout = "{}"
-    stderr = ""
-
-
 def _env(**values):
     """Environnement contrôlé : ni HIGGSFIELD_CLI_PATH ni APPDATA hérités."""
 
@@ -76,8 +78,9 @@ def _env(**values):
     return patch.dict(os.environ, env, clear=True)
 
 
-class _TmpCase(unittest.TestCase):
+class _TmpCase(NoEgressTestCase, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
@@ -96,12 +99,25 @@ class _TmpCase(unittest.TestCase):
 
     def assert_refused_without_process(self, client, error_type, reason_prefix=None):
         for call in _READ_ONLY_CALLS:
-            with self.subTest(command=client.command), patch("subprocess.run") as mock_run:
+            with self.subTest(command=client.command):
                 with self.assertRaises(error_type) as ctx:
                     call(client)
-                mock_run.assert_not_called()
                 if reason_prefix is not None:
                     self.assertTrue(ctx.exception.reasons[0].startswith(reason_prefix), ctx.exception.reasons)
+        with self.assertRaises(error_type):
+            client.build_argv("account", "status")
+        self.assertEqual(self.egress, [])
+
+    def assert_closed_after_valid_argv(self, client, expected_prefix):
+        """Configuration valide : argv construit (pur), puis `run()` refuse sans processus."""
+
+        self.assertEqual(client.build_argv("account", "status")[:len(expected_prefix)], expected_prefix)
+        for call in _READ_ONLY_CALLS:
+            with self.subTest(command=client.command):
+                with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+                    call(client)
+                self.assertEqual(ctx.exception.reasons, [PROVIDER_CLOSED])
+        self.assertEqual(self.egress, [])
 
 
 class TestPriority(_TmpCase):
@@ -129,32 +145,24 @@ class TestPriority(_TmpCase):
 
 
 class TestValidConfiguration(_TmpCase):
-    def test_explicit_valid_command_runs_mocked_with_shell_false(self):
+    def test_explicit_valid_command_builds_its_argv_and_is_closed(self):
         client = HiggsfieldClient(command=str(self.plain_cli))
-        with patch("subprocess.run", return_value=_Completed()) as mock_run:
-            client.account_status()
-        argv = mock_run.call_args.args[0]
-        self.assertEqual(argv[0], str(self.plain_cli))
-        self.assertIs(mock_run.call_args.kwargs["shell"], False)
+        self.assert_closed_after_valid_argv(client, [str(self.plain_cli), "--json"])
 
-    def test_environment_valid_plain_executable_runs_mocked(self):
+    def test_environment_valid_plain_executable_builds_its_argv_and_is_closed(self):
         with _env(**{HIGGSFIELD_CLI_ENV_VAR: str(self.plain_cli)}):
             client = HiggsfieldClient()
-        with patch("subprocess.run", return_value=_Completed()) as mock_run:
-            client.account_status()
-        self.assertEqual(mock_run.call_args.args[0][0], str(self.plain_cli))
+        self.assert_closed_after_valid_argv(client, [str(self.plain_cli), "--json"])
 
-    def test_environment_npm_shim_uses_direct_node_invocation_never_cmd(self):
+    def test_environment_npm_shim_targets_direct_node_invocation_never_cmd(self):
         shim = self._npm_layout(self.tmp / "npm")
         with _env(**{HIGGSFIELD_CLI_ENV_VAR: str(shim)}):
             client = HiggsfieldClient()
         self.assertIsNotNone(client._direct_invocation)
-        with patch("subprocess.run", return_value=_Completed()) as mock_run:
-            client.account_status()
-        argv = mock_run.call_args.args[0]
+        argv = client.build_argv("account", "status")
         self.assertTrue(argv[0].endswith("node.exe"))
         self.assertTrue(argv[1].endswith("higgsfield.js"))
-        self.assertIs(mock_run.call_args.kwargs["shell"], False)
+        self.assert_closed_after_valid_argv(client, [*client._direct_invocation, "--json"])
 
     def test_default_npm_shim_under_appdata_uses_direct_node_invocation(self):
         self._npm_layout(self.tmp / "npm")
@@ -164,12 +172,10 @@ class TestValidConfiguration(_TmpCase):
         self.assertIsNotNone(client._direct_invocation)
 
     def test_construction_never_launches_a_process(self):
-        with patch("subprocess.run") as mock_run, patch("subprocess.Popen") as mock_popen:
+        HiggsfieldClient()
+        with _env(**{HIGGSFIELD_CLI_ENV_VAR: str(self.plain_cli)}):
             HiggsfieldClient()
-            with _env(**{HIGGSFIELD_CLI_ENV_VAR: str(self.plain_cli)}):
-                HiggsfieldClient()
-        mock_run.assert_not_called()
-        mock_popen.assert_not_called()
+        self.assertEqual(self.egress, [])
 
 
 class TestAbsentConfiguration(_TmpCase):
@@ -293,13 +299,13 @@ class TestRuntimeLockUnchanged(_TmpCase):
             unconfigured = HiggsfieldClient(command="")
         clients = (unconfigured, HiggsfieldClient(command="cmd.exe"), HiggsfieldClient(command=str(self.plain_cli)))
         for client in clients:
-            with self.subTest(command=client.command), patch("subprocess.run") as mock_run:
+            with self.subTest(command=client.command):
                 with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
                     client.run("generate", "create", "seedance_2_0", "--prompt", "x")
                 self.assertTrue(ctx.exception.reasons[0].startswith("cli_verb_not_read_only"))
                 with self.assertRaises(HiggsfieldRealGenerationDisabledError):
                     client.create_job("seedance_2_0", "x", duration=5)
-                mock_run.assert_not_called()
+        self.assertEqual(self.egress, [])
 
 
 # ----------------------------------------------------------------------
@@ -388,10 +394,7 @@ class TestAlternateDataStreamPathsRefused(_TmpCase):
                 with _env(**{HIGGSFIELD_CLI_ENV_VAR: value}):
                     client = HiggsfieldClient()
                 self.assertEqual((client.command, client.command_source), (value, "environment"))
-                with patch("subprocess.run", return_value=_Completed()) as mock_run:
-                    client.account_status()
-                self.assertEqual(mock_run.call_args.args[0][:2], [value, "--json"])
-                self.assertIs(mock_run.call_args.kwargs["shell"], False)
+                self.assert_closed_after_valid_argv(client, [value, "--json"])
         for value in ("fake-higgsfield-cli", "\\\\server\\share\\higgsfield.exe", str(self.plain_cli)):
             with self.subTest(value=value):
                 self.assertEqual(HiggsfieldClient(command=value).command, value)
@@ -406,88 +409,52 @@ class TestAlternateDataStreamPathsRefused(_TmpCase):
         # Avant STEP-3 : OSError brut levé par gate.evaluate().
         with _env(**{HIGGSFIELD_CLI_ENV_VAR: str(self.plain_cli) + "::$DATA"}):
             gate = GenerationApprovalGate(HiggsfieldProvider(client=HiggsfieldClient()))
-        with patch("subprocess.run") as mock_run:
-            decision = gate.evaluate(_request()).decision
-        mock_run.assert_not_called()
+        decision = gate.evaluate(_request()).decision
+        self.assertEqual(self.egress, [])
         self.assertNotEqual(decision, GenerationApprovalDecision.APPROVED)
 
 
-class TestLaunchOSErrorNormalization(_TmpCase):
+class TestNoLaunchIsAttemptedForAValidCli(_TmpCase):
+    """Remplace la normalisation P3.105-STEP-3 des OSError de lancement :
+    Provider = CLOSED, aucun lancement n'est tenté, donc aucune erreur de
+    lancement ne peut survenir ni être normalisée."""
+
     def setUp(self):
         super().setUp()
         self.client = HiggsfieldClient(command=str(self.plain_cli))
 
-    def _run_with(self, side_effect=None, return_value=None):
-        with patch("subprocess.run", side_effect=side_effect, return_value=return_value) as mock_run:
-            try:
+    def test_valid_cli_read_is_closed_never_a_command_or_not_found_error(self):
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+            self.client.account_status()
+        self.assertEqual(ctx.exception.reasons, [PROVIDER_CLOSED])
+        self.assertNotIsInstance(ctx.exception, (HiggsfieldCommandError, HiggsfieldCLINotFoundError))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertEqual(self.egress, [])
+
+    def test_a_launch_failure_would_be_unreachable(self):
+        # Si un lancement était encore tenté, ce Popen piégé serait appelé et
+        # sa OSError apparaîtrait (normalisée ou non) : rien de tel.
+        with patch("subprocess.Popen", side_effect=OSError(22, "bad exe format", None, 193)) as popen:
+            with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
                 self.client.account_status()
-            finally:
-                self.assertEqual(mock_run.call_count, 1)
-
-    def test_missing_file_still_cli_not_found(self):
-        original = FileNotFoundError(2, "not found")
-        with self.assertRaises(HiggsfieldCLINotFoundError) as ctx:
-            self._run_with(side_effect=original)
-        self.assertIs(ctx.exception.__cause__, original)
-
-    def test_launch_refusals_become_command_errors_not_not_found(self):
-        refusals = [
-            OSError(22, "bad exe format", None, 193),
-            OSError(22, "invalid name", None, 123),
-            PermissionError(13, "access denied"),
-            IsADirectoryError(21, "is a directory"),
-            OSError(5, "I/O error"),
-        ]
-        for original in refusals:
-            with self.subTest(error=repr(original)):
-                with self.assertRaises(HiggsfieldCommandError) as ctx:
-                    self._run_with(side_effect=original)
-                self.assertNotIsInstance(ctx.exception, HiggsfieldCLINotFoundError)
-                self.assertIsNone(ctx.exception.exit_code)
-                self.assertIs(ctx.exception.__cause__, original)
-                self.assertIn(str(self.plain_cli), str(ctx.exception))
-
-    def test_winerror_code_is_kept_in_the_message(self):
-        with self.assertRaises(HiggsfieldCommandError) as ctx:
-            self._run_with(side_effect=OSError(22, "bad exe format", None, 193))
-        if os.name == "nt":
-            self.assertIn("193", str(ctx.exception))
-
-    def test_timeout_still_timeout_error(self):
-        with self.assertRaises(HiggsfieldTimeoutError):
-            self._run_with(side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1))
-
-    def test_exit_code_auth_and_json_errors_unchanged(self):
-        class _Failed:
-            returncode = 3
-            stdout = ""
-            stderr = "boom"
-
-        class _Auth(_Failed):
-            stderr = "Not authenticated, please run auth login"
-
-        class _NotJson(_Completed):
-            stdout = "not json"
-
-        with self.assertRaises(HiggsfieldCommandError) as ctx:
-            self._run_with(return_value=_Failed())
-        self.assertEqual(ctx.exception.exit_code, 3)
-        with self.assertRaises(HiggsfieldAuthenticationError):
-            self._run_with(return_value=_Auth())
-        with self.assertRaises(HiggsfieldInvalidResponseError):
-            self._run_with(return_value=_NotJson())
+        popen.assert_not_called()
+        self.assertEqual(ctx.exception.reasons, [PROVIDER_CLOSED])
 
     def test_runtime_lock_refusal_is_never_normalized(self):
-        with patch("subprocess.run", side_effect=OSError(22, "x", None, 193)) as mock_run:
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-                self.client.run("generate", "create", "seedance_2_0", "--prompt", "x")
-        mock_run.assert_not_called()
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+            self.client.run("generate", "create", "seedance_2_0", "--prompt", "x")
+        self.assertTrue(ctx.exception.reasons[0].startswith("cli_verb_not_read_only"))
+        self.assertEqual(self.egress, [])
 
-    def test_launch_refusal_through_real_gate_is_a_structured_refusal(self):
-        gate = GenerationApprovalGate(HiggsfieldProvider(client=self.client))
-        with patch("subprocess.run", side_effect=OSError(22, "bad exe format", None, 193)):
-            decision = gate.evaluate(_request()).decision
-        self.assertNotEqual(decision, GenerationApprovalDecision.APPROVED)
+    def test_valid_cli_through_real_gate_is_blocked_before_any_provider_call(self):
+        provider = HiggsfieldProvider(client=self.client)
+        gate = GenerationApprovalGate(provider)
+        with patch.object(provider, "get_model", side_effect=AssertionError("get_model reached")) as get_model:
+            result = gate.evaluate(_request())
+        get_model.assert_not_called()
+        self.assertEqual(result.decision, GenerationApprovalDecision.BLOCKED)
+        self.assertTrue(any("Provider = CLOSED" in reason for reason in result.reasons), result.reasons)
+        self.assertEqual(self.egress, [])
 
 
 if __name__ == "__main__":

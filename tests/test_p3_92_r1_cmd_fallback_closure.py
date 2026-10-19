@@ -9,14 +9,18 @@ qui ré-interprète la ligne de commande. Un argument d'un verbe autorisé
 même après un rejet de l'Identity Lock) pouvait alors enchaîner une
 seconde commande (`& higgsfield generate create ...`), hors allowlist.
 
-Méthode : faux shims dans un répertoire temporaire, `subprocess.run`
-mocké ou gardé ; le seul processus réellement lancé (test de non-
-exécution) serait un `echo` inoffensif. Aucun CLI Higgsfield, aucun
-réseau, aucun crédit.
+Provider = CLOSED : `run()` ne lance plus aucun processus, même pour une
+lecture valide. Ces tests vérifient donc que le repli cmd.exe reste refusé
+par la validation (`build_argv()`, pure) avant même le refus final, et que
+l'argv construit pour l'invocation directe passe par node.exe.
+
+Méthode : faux shims dans un répertoire temporaire ; chaque test tourne
+sous `no_egress()`, qui enregistre et refuse tout lancement de processus ou
+toute connexion (l'enregistrement doit rester vide). Aucun CLI Higgsfield,
+aucun réseau, aucun crédit.
 """
 
 import os
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -41,6 +45,9 @@ from agents.release_candidate_identity_lock import (
 from integrations.higgsfield.client import HiggsfieldClient, _runs_through_cmd_exe
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.provider import HiggsfieldProvider
+from tests.provider_closure_helpers import NoEgressTestCase
+
+PROVIDER_CLOSED = "provider_closed_no_cli_process"
 
 _FAKE_NPM_SHIM = (
     '@ECHO off\n'
@@ -62,10 +69,14 @@ _READ_ONLY_CALLS = (
 )
 
 
-class _Completed:
-    returncode = 0
-    stdout = "{}"
-    stderr = ""
+def _built_argvs(client):
+    """argv validés que chaque lecture aurait lancés (`run()` remplacé : rien ne tourne)."""
+
+    forwarded = []
+    with patch.object(HiggsfieldClient, "run", lambda self, *args, **kwargs: forwarded.append(args)):
+        for call in _READ_ONLY_CALLS:
+            call(client)
+    return [client.build_argv(*args) for args in forwarded]
 
 
 def _payload(marker: Path) -> str:
@@ -74,8 +85,9 @@ def _payload(marker: Path) -> str:
 
 
 @unittest.skipUnless(os.name == "nt", "cmd.exe n'existe que sous Windows.")
-class TestCmdExeFallbackIsClosed(unittest.TestCase):
+class TestCmdExeFallbackIsClosed(NoEgressTestCase, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
@@ -98,31 +110,40 @@ class TestCmdExeFallbackIsClosed(unittest.TestCase):
         for command in self._variants():
             client = HiggsfieldClient(command=command)
             for call in _READ_ONLY_CALLS:
-                with self.subTest(command=command), patch("subprocess.run") as mock_run:
+                with self.subTest(command=command):
                     with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
                         call(client)
-                    mock_run.assert_not_called()
                     self.assertTrue(ctx.exception.reasons[0].startswith("cmd_exe_fallback_refused"))
+        self.assertEqual(self.egress, [])
+
+    def test_the_fallback_is_refused_by_the_pure_validation_itself(self):
+        client = HiggsfieldClient(command=str(self.foreign_cmd))
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+            client.build_argv("account", "status")
+        self.assertTrue(ctx.exception.reasons[0].startswith("cmd_exe_fallback_refused"))
+        self.assertEqual(self.egress, [])
 
     def test_generative_verbs_stay_refused_by_the_runtime_lock_first(self):
         client = HiggsfieldClient(command=str(self.foreign_cmd))
-        with patch("subprocess.run") as mock_run:
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
-                client.run("generate", "create", "seedance_2_0", "--prompt", "x")
-            self.assertTrue(ctx.exception.reasons[0].startswith("cli_verb_not_read_only"))
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-                client.create_job("seedance_2_0", "x", duration=5)
-            mock_run.assert_not_called()
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+            client.run("generate", "create", "seedance_2_0", "--prompt", "x")
+        self.assertTrue(ctx.exception.reasons[0].startswith("cli_verb_not_read_only"))
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+            client.create_job("seedance_2_0", "x", duration=5)
+        self.assertEqual(self.egress, [])
 
     def test_injection_payload_is_never_executed_by_cmd_exe(self):
-        """Sans mock : si le repli était encore ouvert, cmd.exe exécuterait
-        le `echo` injecté et créerait le marqueur (reproduction P3.92)."""
+        """Si le repli était encore ouvert, cmd.exe exécuterait le `echo`
+        injecté et créerait le marqueur (reproduction P3.92) ; ici, toute
+        tentative de processus serait de plus enregistrée par la sentinelle."""
 
         marker = self.tmp / "injected.txt"
         client = HiggsfieldClient(command=str(self.foreign_cmd))
-        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
             client.run("model", "get", _payload(marker))
+        self.assertTrue(ctx.exception.reasons[0].startswith("cmd_exe_fallback_refused"))
         self.assertFalse(marker.exists())
+        self.assertEqual(self.egress, [])
 
     def test_injection_through_the_real_gate_path_spawns_nothing(self):
         marker = self.tmp / "injected_gate.txt"
@@ -133,16 +154,16 @@ class TestCmdExeFallbackIsClosed(unittest.TestCase):
             identity_lock=ReleaseCandidateIdentityLock(VIDEO_005_RELEASE_CANDIDATE),
         )
         request = GenerationRequest(request_id="005", job_type=_payload(marker), prompt="p")
-        with patch("subprocess.run", wraps=subprocess.run) as spy:
-            decision = gate.evaluate(request).decision
-        spy.assert_not_called()
+        decision = gate.evaluate(request).decision
+        self.assertEqual(self.egress, [])
         self.assertFalse(marker.exists())
         self.assertNotEqual(decision, GenerationApprovalDecision.APPROVED)
 
 
 @unittest.skipUnless(os.name == "nt", "Invocation directe spécifique à Windows.")
-class TestReadOnlyOperationsStayFunctional(unittest.TestCase):
+class TestReadOnlyArgvTargetsNodeNeverCmd(NoEgressTestCase, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         root = Path(self._tmp.name)
@@ -154,41 +175,53 @@ class TestReadOnlyOperationsStayFunctional(unittest.TestCase):
         shim.write_text(_FAKE_NPM_SHIM, encoding="utf-8")
         self.client = HiggsfieldClient(command=str(shim))
 
-    def test_npm_layout_executes_read_only_calls_via_node_never_cmd(self):
+    def test_npm_layout_builds_read_only_argv_via_node_never_cmd(self):
         self.assertIsNotNone(self.client._direct_invocation)
-        for call in _READ_ONLY_CALLS:
-            with self.subTest(), patch("subprocess.run", return_value=_Completed()) as mock_run:
-                call(self.client)
-                argv = mock_run.call_args.args[0]
+        argvs = _built_argvs(self.client)
+        self.assertEqual(len(argvs), len(_READ_ONLY_CALLS))
+        for argv in argvs:
+            with self.subTest(argv=argv):
                 self.assertEqual(argv[:2], self.client._direct_invocation)
                 self.assertTrue(argv[0].endswith("node.exe"))
-                self.assertIs(mock_run.call_args.kwargs["shell"], False)
+                self.assertEqual(argv[2], "--json")
+        self.assertEqual(self.egress, [])
+
+    def test_npm_layout_read_only_calls_are_refused_without_a_process(self):
+        for call in _READ_ONLY_CALLS:
+            with self.subTest(call=call):
+                with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+                    call(self.client)
+                self.assertEqual(ctx.exception.reasons, [PROVIDER_CLOSED])
+        self.assertEqual(self.egress, [])
 
     def test_runtime_lock_unchanged_with_direct_invocation(self):
-        with patch("subprocess.run") as mock_run:
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-                self.client.run("generate", "create", "seedance_2_0", "--prompt", "x")
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-                self.client.run("generate", "cost", "workflow", "reframe")
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-                self.client.create_job("seedance_2_0", "x")
-            mock_run.assert_not_called()
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+            self.client.run("generate", "create", "seedance_2_0", "--prompt", "x")
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+            self.client.run("generate", "cost", "workflow", "reframe")
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+            self.client.create_job("seedance_2_0", "x")
+        self.assertEqual(self.egress, [])
 
 
-class TestNonShimCommandsUnaffected(unittest.TestCase):
-    def test_plain_executable_command_still_runs(self):
+class TestNonShimCommandsUnaffected(NoEgressTestCase, unittest.TestCase):
+    def test_plain_executable_command_builds_its_argv_but_never_runs(self):
         client = HiggsfieldClient(command="fake-higgsfield-cli")
-        with patch("subprocess.run", return_value=_Completed()) as mock_run:
+        self.assertEqual(client.build_argv("account", "status"), ["fake-higgsfield-cli", "--json", "account", "status"])
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
             client.account_status()
-        self.assertEqual(mock_run.call_args.args[0][0], "fake-higgsfield-cli")
+        self.assertEqual(ctx.exception.reasons, [PROVIDER_CLOSED])
+        self.assertEqual(self.egress, [])
 
     def test_cmd_suffix_is_not_special_off_windows(self):
         with patch("integrations.higgsfield.client.os.name", "posix"):
             self.assertFalse(_runs_through_cmd_exe("/opt/higgsfield.cmd"))
             client = HiggsfieldClient(command="/opt/higgsfield.cmd")
-            with patch("subprocess.run", return_value=_Completed()) as mock_run:
+            self.assertEqual(client.build_argv("account", "status"), ["/opt/higgsfield.cmd", "--json", "account", "status"])
+            with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
                 client.account_status()
-            mock_run.assert_called_once()
+            self.assertEqual(ctx.exception.reasons, [PROVIDER_CLOSED])
+        self.assertEqual(self.egress, [])
 
     def test_detection_helper(self):
         with patch("integrations.higgsfield.client.os.name", "nt"):
