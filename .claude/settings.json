@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "mcp__higgsfield",
+      "Skill(higgsfield-generate)",
+      "Skill(higgsfield-generate *)"
+    ]
+  }
+}
