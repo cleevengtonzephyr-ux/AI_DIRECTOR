@@ -14,9 +14,10 @@ n'implémente une identité d'autorisateur :
    dans la décision de Phase A ;
 4. les quatre verrous d'exécution restent fermés.
 
-MOCK-ONLY : `MockHiggsfieldProvider`, store en mémoire, et un
-`subprocess` factice qui échoue s'il est appelé. Aucun réseau, aucune
-génération, aucun accès à `state/`.
+MOCK-ONLY : `MockHiggsfieldProvider`, store en mémoire, et des
+sentinelles (`no_egress()`) qui enregistrent et refusent tout lancement de
+processus ou toute connexion. Aucun réseau, aucune génération, aucun accès
+à `state/`.
 """
 
 import ast
@@ -25,7 +26,6 @@ import re
 import sys
 import unittest
 from pathlib import Path
-from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,6 +44,7 @@ from integrations.higgsfield.client import HiggsfieldClient
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.mock_provider import MockHiggsfieldProvider
 from tests.authorization_content_helpers import bound_authorization, content_media
+from tests.provider_closure_helpers import no_egress
 
 DECISION_DOC = PROJECT_ROOT / "docs" / "phase_a_real_generation_decision.md"
 DESIGN_DOC = PROJECT_ROOT / "docs" / "phase_c_authorizer_identity_design.md"
@@ -312,16 +313,19 @@ class FourExecutionLocksRemainClosed(unittest.TestCase):
 
     def test_lock_4_client_run_refuses_generation_before_any_process(self):
         self.assertNotIn(("generate", "create"), client_mod._READ_ONLY_CLI_VERBS)
-        exploding = mock.Mock(spec=["run", "TimeoutExpired"])
-        exploding.run.side_effect = AssertionError("a process was launched")
-        exploding.TimeoutExpired = client_mod.subprocess.TimeoutExpired
-        with mock.patch.object(client_mod, "subprocess", exploding):
-            client = HiggsfieldClient()
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+        self.assertFalse(hasattr(client_mod, "subprocess"), "the client module must not import subprocess")
+        with no_egress() as egress:
+            client = HiggsfieldClient(command="fake-higgsfield-cli")
+            with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
                 client.run("generate", "create", "seedance_2_0")
+            self.assertEqual(ctx.exception.reasons, ["cli_verb_not_read_only: ('generate', 'create')"])
             with self.assertRaises(HiggsfieldRealGenerationDisabledError):
                 client.create_job("seedance_2_0", "P")
-        exploding.run.assert_not_called()
+            # Provider = CLOSED : même une lecture valide ne lance rien.
+            with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+                client.run("account", "status")
+            self.assertEqual(ctx.exception.reasons, ["provider_closed_no_cli_process"])
+        self.assertEqual(egress, [])
 
 
 if __name__ == "__main__":

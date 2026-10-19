@@ -12,22 +12,20 @@ défaut du modèle (5s) au lieu de la durée demandée. Le correctif
 (`HiggsfieldClient._resolve_direct_invocation`) contourne le shim
 .cmd/cmd.exe en invoquant directement Node.js sur le script .js relayé.
 
-Contrairement à `tests/test_phase_p2_1_multiline_prompt_cli.py` (qui
-utilise un VRAI sous-processus avec un faux shim, pour prouver le
-correctif au niveau OS), ce fichier MOCKE entièrement `subprocess.run`
-(comme demandé pour cette phase de verrouillage) : il verrouille que
-(a) la détection du contournement reste active et (b) la LISTE
-d'arguments construite par HiggsfieldClient.run() ne perd, ne scinde,
-ni ne réordonne jamais le prompt ou les paramètres qui le suivent —
-quelle que soit la forme du prompt. Aucun appel réseau, aucun CLI réel,
-aucune génération, aucun crédit consommé.
+Provider = CLOSED : `run()` ne lance plus aucun processus. Ce fichier
+verrouille que (a) la détection du contournement reste active et (b) la
+LISTE d'arguments construite par la fonction pure `build_argv()` (celle
+que `run()` valide avant de refuser) ne perd, ne scinde, ni ne réordonne
+jamais le prompt ou les paramètres qui le suivent — quelle que soit la
+forme du prompt — et (c) que `run()` refuse sans processus. Chaque test
+tourne sous `no_egress()`. Aucun appel réseau, aucun CLI réel, aucune
+génération, aucun crédit consommé.
 """
 
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,7 +33,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from integrations.higgsfield.client import HiggsfieldClient
+from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from agents.production_model import PRODUCTION_MODEL
+from tests.provider_closure_helpers import NoEgressTestCase
+
+PROVIDER_CLOSED = "provider_closed_no_cli_process"
 
 # Test C : >= 200 lignes, espaces, caractères spéciaux raisonnables.
 MULTILINE_PROMPT_200_LINES = "\n".join(
@@ -62,17 +64,10 @@ _FAKE_NPM_SHIM = (
 )
 
 
-class _FakeCompletedProcess:
-    def __init__(self, returncode=0, stdout='{"credits": 67.5}', stderr=""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
 def _build_fake_npm_client(tmp_path: Path) -> HiggsfieldClient:
     """Fabrique un HiggsfieldClient pointant sur un faux shim npm (disposition
-    réelle), sans jamais exécuter quoi que ce soit : subprocess.run est mocké
-    par les tests. Le fichier node.exe n'a besoin que d'exister (jamais lancé)."""
+    réelle), sans jamais exécuter quoi que ce soit. Le fichier node.exe n'a
+    besoin que d'exister (jamais lancé)."""
 
     bin_dir = tmp_path / "node_modules" / "@higgsfield" / "cli" / "bin"
     bin_dir.mkdir(parents=True)
@@ -89,38 +84,46 @@ def _build_fake_npm_client(tmp_path: Path) -> HiggsfieldClient:
     __import__("os").name == "nt",
     "Le contournement testé est spécifique à l'invocation .cmd sous Windows.",
 )
-class TestMultilinePromptTransportIsNeverCorrupted(unittest.TestCase):
+class TestMultilinePromptTransportIsNeverCorrupted(NoEgressTestCase, unittest.TestCase):
     """Verrou 3 : Test A/B/C — le prompt et les paramètres qui le suivent
     (duration, job_type, resolution, aspect_ratio) restent intacts et
     correctement ordonnés, quelle que soit la forme du prompt."""
 
     def setUp(self):
+        super().setUp()
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.client = _build_fake_npm_client(Path(self._tmp.name))
 
+    @staticmethod
+    def _cost_args(prompt: str):
+        return (
+            "generate",
+            "cost",
+            PRODUCTION_MODEL,
+            "--prompt",
+            prompt,
+            "--duration",
+            "15",
+            "--resolution",
+            "720p",
+            "--aspect-ratio",
+            "9:16",
+        )
+
     def _run_and_capture_argv(self, prompt: str):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = _FakeCompletedProcess()
-            self.client.run(
-                "generate",
-                "cost",
-                PRODUCTION_MODEL,
-                "--prompt",
-                prompt,
-                "--duration",
-                "15",
-                "--resolution",
-                "720p",
-                "--aspect-ratio",
-                "9:16",
-            )
-            called_args = mock_run.call_args.args[0]
-            return called_args
+        """argv validé par la fonction pure ; `run()` refuse ensuite sans processus."""
+
+        argv = self.client.build_argv(*self._cost_args(prompt))
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+            self.client.run(*self._cost_args(prompt))
+        self.assertEqual(ctx.exception.reasons, [PROVIDER_CLOSED])
+        self.assertEqual(self.egress, [])
+        return argv
 
     def _assert_argv_is_intact(self, argv, prompt):
-        # Le contournement du shim .cmd doit rester actif : subprocess.run
-        # ne doit JAMAIS être invoqué directement sur le .cmd.
+        # Le contournement du shim .cmd doit rester actif : l'argv ne doit
+        # JAMAIS cibler directement le .cmd.
         self.assertTrue(argv[0].endswith("node.exe"))
         self.assertTrue(argv[1].endswith("higgsfield.js"))
 

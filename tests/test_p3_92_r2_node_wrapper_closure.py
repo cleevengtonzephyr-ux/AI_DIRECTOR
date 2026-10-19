@@ -9,14 +9,19 @@ verrou R1 ne portait que sur le cas `_direct_invocation is None` : cmd.exe
 <job_type>`, atteint par `GenerationApprovalGate.evaluate()`) pouvait
 enchaîner une seconde commande.
 
+Provider = CLOSED : `run()` ne lance plus aucun processus, même pour une
+lecture valide. Ces tests vérifient que le wrapper reste refusé par la
+validation (`build_argv()`, pure) avant même le refus final, et que l'argv
+construit avec un vrai node.exe est le bon.
+
 Méthode : disposition npm factice et faux `node.cmd` dans un répertoire
-temporaire placé en tête du PATH ; `subprocess.run` mocké ou espionné ; le
-seul processus qui pourrait être lancé en cas de régression est un `echo`
-inoffensif. Aucune installation réelle de Node/Higgsfield n'est utilisée.
+temporaire placé en tête du PATH ; chaque test tourne sous `no_egress()`,
+qui enregistre et refuse tout lancement de processus ou toute connexion
+(l'enregistrement doit rester vide). Aucune installation réelle de
+Node/Higgsfield n'est utilisée.
 """
 
 import os
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -41,6 +46,9 @@ from agents.release_candidate_identity_lock import (
 from integrations.higgsfield.client import HiggsfieldClient, _is_node_exe
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.provider import HiggsfieldProvider
+from tests.provider_closure_helpers import NoEgressTestCase
+
+PROVIDER_CLOSED = "provider_closed_no_cli_process"
 
 _FAKE_NPM_SHIM = (
     '@ECHO off\n'
@@ -61,20 +69,15 @@ _READ_ONLY_CALLS = (
 )
 
 
-class _Completed:
-    returncode = 0
-    stdout = "{}"
-    stderr = ""
-
-
 def _payload(marker: Path) -> str:
     # En production réelle, `echo ...` serait `higgsfield generate create ...`.
     return f'x" & echo INJECTED>{marker} & rem '
 
 
 @unittest.skipUnless(os.name == "nt", "PATHEXT / cmd.exe n'existent que sous Windows.")
-class TestNodeWrapperOnPathIsRefused(unittest.TestCase):
+class TestNodeWrapperOnPathIsRefused(NoEgressTestCase, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
@@ -103,34 +106,40 @@ class TestNodeWrapperOnPathIsRefused(unittest.TestCase):
         for filename in ("node.cmd", "node.bat"):
             client = self._client_with_node(filename)
             for call in _READ_ONLY_CALLS:
-                with self.subTest(filename=filename), patch("subprocess.run") as mock_run:
+                with self.subTest(filename=filename):
                     with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
                         call(client)
-                    mock_run.assert_not_called()
                     self.assertTrue(
                         ctx.exception.reasons[0].startswith("direct_invocation_interpreter_refused")
                     )
+            with self.subTest(filename=filename, pure="build_argv"):
+                with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+                    client.build_argv("account", "status")
+                self.assertTrue(ctx.exception.reasons[0].startswith("direct_invocation_interpreter_refused"))
+        self.assertEqual(self.egress, [])
 
     def test_generative_attempts_stay_refused(self):
         client = self._client_with_node("node.cmd")
-        with patch("subprocess.run") as mock_run:
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-                client.run("generate", "create", "seedance_2_0", "--prompt", "x")
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-                client.run("model", "get", _payload(self.tmp / "m.txt"))
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-                client.create_job("seedance_2_0", "x", duration=5)
-            mock_run.assert_not_called()
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+            client.run("generate", "create", "seedance_2_0", "--prompt", "x")
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+            client.run("model", "get", _payload(self.tmp / "m.txt"))
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+            client.create_job("seedance_2_0", "x", duration=5)
+        self.assertEqual(self.egress, [])
 
     def test_injection_payload_is_never_executed(self):
-        """Sans mock : en cas de régression, cmd.exe exécuterait l'`echo`
-        injecté et créerait le marqueur (reproduction P3.92)."""
+        """En cas de régression, cmd.exe exécuterait l'`echo` injecté et
+        créerait le marqueur (reproduction P3.92) ; toute tentative de
+        processus serait de plus enregistrée par la sentinelle."""
 
         marker = self.tmp / "injected.txt"
         client = self._client_with_node("node.cmd")
-        with self.assertRaises(HiggsfieldRealGenerationDisabledError):
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
             client.run("model", "get", _payload(marker))
+        self.assertTrue(ctx.exception.reasons[0].startswith("direct_invocation_interpreter_refused"))
         self.assertFalse(marker.exists())
+        self.assertEqual(self.egress, [])
 
     def test_injection_through_the_real_gate_path_spawns_nothing(self):
         marker = self.tmp / "injected_gate.txt"
@@ -141,31 +150,38 @@ class TestNodeWrapperOnPathIsRefused(unittest.TestCase):
             identity_lock=ReleaseCandidateIdentityLock(VIDEO_005_RELEASE_CANDIDATE),
         )
         request = GenerationRequest(request_id="005", job_type=_payload(marker), prompt="p")
-        with patch("subprocess.run", wraps=subprocess.run) as spy:
-            decision = gate.evaluate(request).decision
-        spy.assert_not_called()
+        decision = gate.evaluate(request).decision
+        self.assertEqual(self.egress, [])
         self.assertFalse(marker.exists())
         self.assertNotEqual(decision, GenerationApprovalDecision.APPROVED)
 
-    def test_real_node_exe_on_path_keeps_read_only_calls_working(self):
+    def test_real_node_exe_on_path_builds_the_argv_but_never_runs(self):
         client = self._client_with_node("node.exe")
         self.assertEqual(Path(client._direct_invocation[0]).name.lower(), "node.exe")
-        for call in _READ_ONLY_CALLS:
-            with self.subTest(), patch("subprocess.run", return_value=_Completed()) as mock_run:
+        forwarded = []
+        with patch.object(HiggsfieldClient, "run", lambda self, *args, **kwargs: forwarded.append(args)):
+            for call in _READ_ONLY_CALLS:
                 call(client)
-                self.assertEqual(mock_run.call_args.args[0][:2], client._direct_invocation)
-                self.assertIs(mock_run.call_args.kwargs["shell"], False)
+        self.assertEqual(len(forwarded), len(_READ_ONLY_CALLS))
+        for args in forwarded:
+            with self.subTest(args=args):
+                self.assertEqual(client.build_argv(*args), [*client._direct_invocation, "--json", *args])
+        for call in _READ_ONLY_CALLS:
+            with self.subTest(call=call):
+                with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+                    call(client)
+                self.assertEqual(ctx.exception.reasons, [PROVIDER_CLOSED])
+        self.assertEqual(self.egress, [])
 
     def test_f1_cmd_fallback_stays_closed(self):
         foreign = self.tmp / "foreign.cmd"
         foreign.write_text("@echo FAKE %*\r\n", encoding="ascii")
         client = HiggsfieldClient(command=str(foreign))
         self.assertIsNone(client._direct_invocation)
-        with patch("subprocess.run") as mock_run:
-            with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
-                client.account_status()
-            mock_run.assert_not_called()
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+            client.account_status()
         self.assertTrue(ctx.exception.reasons[0].startswith("cmd_exe_fallback_refused"))
+        self.assertEqual(self.egress, [])
 
 
 class TestNodeExeAllowlist(unittest.TestCase):

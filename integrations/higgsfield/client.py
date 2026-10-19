@@ -1,12 +1,10 @@
-import json
 import ntpath
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, NoReturn, Optional, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -15,18 +13,21 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from integrations.higgsfield.errors import (
-    HiggsfieldAuthenticationError,
     HiggsfieldCLINotFoundError,
-    HiggsfieldCommandError,
-    HiggsfieldInvalidResponseError,
     HiggsfieldRealGenerationDisabledError,
-    HiggsfieldTimeoutError,
 )
 
 
-# Phase P3.83 -- verrou runtime D (spécification P3.82). `run()` n'exécute
-# QUE ces paires (verbe, sous-verbe) en lecture seule ; toute autre paire,
-# dont `generate create`, est refusée AVANT la construction de la commande.
+# Provider = CLOSED : ce module ne lance AUCUN processus, pas même une
+# commande Higgsfield en lecture seule. `run()` valide la commande puis
+# refuse toujours ; aucune variable, option ni configuration ne rouvre cet
+# appel. Une réouverture exige une décision écrite et une étape distinctes
+# (docs/phase_a_real_generation_decision.md).
+#
+# Phase P3.83 -- verrou runtime D (spécification P3.82). Seules ces paires
+# (verbe, sous-verbe) en lecture seule passent la validation de
+# `build_cli_argv()` ; toute autre paire, dont `generate create`, est
+# refusée AVANT la construction de la commande.
 # Liste fermée (fail closed), sans état : aucune variable, aucun appelant,
 # aucun booléen ne peut l'élargir -- ce n'est pas une autorité, c'est une
 # fermeture. Une future activation réelle ne rouvrira jamais `run()` : elle
@@ -260,49 +261,122 @@ def build_create_job_args(job_type: str, prompt: str, **params: Any) -> List[str
     return args
 
 
+def build_cli_argv(
+    args: Sequence[str],
+    *,
+    command: Optional[str],
+    command_source: str,
+    command_error: Optional[str],
+    direct_invocation: Optional[List[str]],
+) -> List[str]:
+    """
+    Pure : valide une commande Higgsfield et renvoie l'argv exact qu'une
+    future étape autorisée lancerait. N'exécute RIEN (aucun processus,
+    aucune E/S) : tant que Provider = CLOSED, `HiggsfieldClient.run()`
+    refuse toujours après cette validation.
+
+    Refus, dans cet ordre, avec `HiggsfieldRealGenerationDisabledError`
+    sauf mention contraire :
+    - verbe hors `_READ_ONLY_CLI_VERBS` (P3.83), dont `generate create` ;
+    - forme non canonique de `generate cost` (P3.85) ou de
+      `account transactions` (P3.86-C) ;
+    - CLI non configurée (P3.105) : `HiggsfieldCLINotFoundError` ;
+    - interpréteur de commandes désigné comme CLI (P3.105) ;
+    - shim .cmd/.bat sans invocation Node directe : cmd.exe ré-analyserait
+      les arguments (P3.92-R1) ;
+    - invocation directe par autre chose qu'un vrai node.exe (P3.92-R2).
+    """
+
+    args = tuple(args)
+    verb = args[:2]
+    if verb not in _READ_ONLY_CLI_VERBS:
+        raise HiggsfieldRealGenerationDisabledError(
+            "HiggsfieldClient.run() only accepts read-only Higgsfield CLI "
+            "verbs (Phase P3.83 runtime lock): generation and every "
+            "non-allowlisted verb are refused before any command is built, "
+            "whoever holds this client.",
+            reasons=[f"cli_verb_not_read_only: {verb!r}"],
+        )
+    if verb == ("generate", "cost"):
+        cost_violations = _generate_cost_violations(args)
+        if cost_violations:
+            raise HiggsfieldRealGenerationDisabledError(
+                "HiggsfieldClient.run() only accepts the exact read-only "
+                "cost-estimation form (Phase P3.85): generate cost "
+                "<job_type> [--prompt] [--duration] [--resolution] "
+                "[--aspect-ratio].",
+                reasons=cost_violations,
+            )
+    if verb == ("account", "transactions"):
+        transactions_violations = _account_transactions_violations(args)
+        if transactions_violations:
+            raise HiggsfieldRealGenerationDisabledError(
+                "HiggsfieldClient.run() only accepts the canonical read-only "
+                "form (Phase P3.86-C): account transactions [--size <1..100>] "
+                "[--cursor <token>].",
+                reasons=transactions_violations,
+            )
+    if command is None:
+        # Phase P3.105 (F8-2) : source absente ou invalide -- aucun repli.
+        raise HiggsfieldCLINotFoundError(
+            f"Higgsfield CLI not configured ({command_source}): "
+            f"{command_error}. No process started."
+        )
+    if _is_shell_interpreter(command):
+        raise HiggsfieldRealGenerationDisabledError(
+            "HiggsfieldClient never designates a command interpreter as "
+            "the Higgsfield CLI (Phase P3.105): it would re-parse the "
+            "arguments exactly like the refused cmd.exe fallback (P3.92).",
+            reasons=[f"shell_interpreter_refused: {command!r}"],
+        )
+    if direct_invocation is None and _runs_through_cmd_exe(command):
+        raise HiggsfieldRealGenerationDisabledError(
+            "HiggsfieldClient never targets the Higgsfield CLI through a "
+            ".cmd/.bat shim (Phase P3.92-R1): cmd.exe would re-parse the "
+            "arguments and could chain a generation command outside the "
+            "read-only allowlist. Only the resolved direct Node.js "
+            "invocation (npm layout) is accepted.",
+            reasons=[f"cmd_exe_fallback_refused: {command!r}"],
+        )
+
+    base_command = direct_invocation or [command]
+    if direct_invocation is not None and not _is_node_exe(base_command[0]):
+        raise HiggsfieldRealGenerationDisabledError(
+            "HiggsfieldClient only targets the direct invocation through a "
+            "real node.exe (Phase P3.92-R2): a node.cmd/node.bat or any "
+            "other wrapper resolved on PATH would run through cmd.exe and "
+            "could chain a generation command outside the read-only "
+            "allowlist.",
+            reasons=[f"direct_invocation_interpreter_refused: {base_command[0]!r}"],
+        )
+    return [*base_command, "--json", *args]
+
+
 class HiggsfieldClient:
     """
-    Safe interface between AI Director and Higgsfield CLI.
+    Interface between AI Director and the Higgsfield CLI -- CLOSED.
 
-    v0.2 (Phase C, MASTER PROMPT V2) :
-    - Timeout, CLI introuvable, échec d'authentification et sortie
-      invalide sont désormais des erreurs typées (voir
-      integrations/higgsfield/errors.py), toutes héritées de
-      RuntimeError pour rester 100% compatibles avec le code V1
-      existant (agents/cost_engine.py, agents/planner.py, director.py)
-      qui capture des `except Exception` génériques.
-    - Les méthodes existantes (list_workflows, get_workflow,
-      account_status, estimate_cost) conservent EXACTEMENT leur
-      signature et leur comportement précédents.
-    - Nouvelles méthodes en lecture seule : list_models, get_model,
-      get_job, list_jobs, wait_for_job.
-    - create_job() existe pour compléter le wrapper CLI, mais n'est
-      appelée par AUCUN code de cette phase. Phase P3.83 : elle est
-      désormais verrouillée ICI aussi (et plus seulement au niveau du
-      Provider, voir provider.py), et `run()` n'exécute que des verbes
-      en lecture seule (`_READ_ONLY_CLI_VERBS`).
+    Provider = CLOSED : aucune méthode ne lance de processus ni ne contacte
+    Higgsfield, pas même une lecture (compte, workflows, modèles, coût,
+    jobs). Chaque lecture passe par `run()`, qui valide la commande
+    (`build_cli_argv()`, pure) puis lève toujours
+    `HiggsfieldRealGenerationDisabledError`. `create_job()` lève sans rien
+    construire (Phase P3.83). Aucune variable, option ni configuration ne
+    rouvre ces appels : une réouverture exige une décision écrite et une
+    étape distinctes (docs/phase_a_real_generation_decision.md).
 
-    Sécurité :
-    - Les commandes sont toujours exécutées via une liste d'arguments
-      séparés (`shell=False`), jamais via une chaîne shell : aucune
-      injection shell n'est possible quel que soit le contenu des
-      paramètres.
-    - Aucun credential/token n'est jamais passé en argument CLI par ce
-      client (l'authentification est gérée par `higgsfield auth login`,
-      côté CLI) ni journalisé.
+    Les signatures V1 (list_workflows, get_workflow, account_status,
+    estimate_cost) et Phase C (list_models, get_model, get_job, list_jobs,
+    wait_for_job) sont conservées ; les erreurs restent typées
+    (integrations/higgsfield/errors.py), héritées de RuntimeError.
+
+    Sécurité des commandes construites :
+    - liste d'arguments séparés, jamais une chaîne shell ;
+    - aucun credential/token n'est jamais placé en argument ni journalisé
+      (l'authentification relève de la CLI).
     """
 
     DEFAULT_TIMEOUT_SECONDS = 120
-
-    _AUTH_FAILURE_MARKERS = (
-        "not authenticated",
-        "not logged in",
-        "unauthorized",
-        "invalid token",
-        "please run",
-        "auth login",
-        "authentication failed",
-    )
 
     # Repère le script JS relayé par un shim npm .cmd/.bat Windows
     # ("%_prog%" "%dp0%\...\<entry>.js" %*), pour pouvoir l'invoquer
@@ -322,8 +396,10 @@ class HiggsfieldClient:
     def _resolve_direct_invocation(self) -> Optional[List[str]]:
         """
         Contourne le shim npm .cmd/.bat quand c'est possible (Phase P2.1).
+        Ne sert qu'à construire l'argv (`build_cli_argv()`) : rien n'est
+        lancé tant que Provider = CLOSED.
 
-        PROBLÈME CONFIRMÉ (lecture seule, `generate cost`) : sur Windows,
+        PROBLÈME CONFIRMÉ AVANT LA FERMETURE (`generate cost`) : sur Windows,
         lancer un fichier .cmd/.bat via subprocess.run(shell=False) passe
         transparemment par cmd.exe (comportement du chargeur Windows,
         indépendant de Python). Le parseur de cmd.exe est orienté ligne :
@@ -384,158 +460,43 @@ class HiggsfieldClient:
 
         return [node_executable, str(script_path)]
 
-    def run(self, *args: str, timeout: Optional[float] = None) -> Any:
+    def build_argv(self, *args: str) -> List[str]:
+        """Pure : argv validé que `run()` refuse ensuite de lancer (cf. `build_cli_argv()`)."""
+
+        return build_cli_argv(
+            args,
+            command=self.command,
+            command_source=self.command_source,
+            command_error=self.command_error,
+            direct_invocation=self._direct_invocation,
+        )
+
+    def run(self, *args: str, timeout: Optional[float] = None) -> NoReturn:
         """
-        Run a Higgsfield CLI command and return JSON when available.
+        Provider = CLOSED : ne lance JAMAIS de processus, pas même une
+        commande Higgsfield en lecture seule.
 
-        Raises (toutes héritées de RuntimeError — compatible V1) :
-        - HiggsfieldCLINotFoundError   si l'exécutable est introuvable.
-        - HiggsfieldTimeoutError       si la commande dépasse le délai.
-        - HiggsfieldAuthenticationError si le CLI signale un échec d'auth.
-        - HiggsfieldCommandError       pour tout autre exit code != 0, ou
-          (P3.105-STEP-3, exit_code=None) si le système refuse de lancer
-          l'exécutable (OSError autre que « introuvable »).
-        - HiggsfieldInvalidResponseError si la sortie n'est pas un JSON
-          valide alors qu'une sortie était attendue.
-        - HiggsfieldRealGenerationDisabledError (Phase P3.83) si
-          `args[:2]` n'est pas un verbe en lecture seule
-          (`_READ_ONLY_CLI_VERBS`) -- levée AVANT toute construction de
-          commande et tout `subprocess`, quel que soit le détenteur du
-          Client.
+        Valide d'abord la commande (`build_argv()`), avec les mêmes refus
+        typés qu'avant : verbe hors allowlist, forme non canonique, CLI non
+        configurée (`HiggsfieldCLINotFoundError`), interpréteur de
+        commandes, repli cmd.exe, wrapper node. Une commande valide lève
+        ensuite toujours `HiggsfieldRealGenerationDisabledError`. `timeout`
+        est conservé pour la compatibilité des signatures. Aucune variable,
+        option ni configuration ne rouvre cet appel.
         """
 
-        verb = tuple(args[:2])
-        if verb not in _READ_ONLY_CLI_VERBS:
-            raise HiggsfieldRealGenerationDisabledError(
-                "HiggsfieldClient.run() only executes read-only Higgsfield CLI "
-                "verbs (Phase P3.83 runtime lock): generation and every "
-                "non-allowlisted verb are refused before any process is "
-                "started, whoever holds this client.",
-                reasons=[f"cli_verb_not_read_only: {verb!r}"],
-            )
-        if verb == ("generate", "cost"):
-            cost_violations = _generate_cost_violations(args)
-            if cost_violations:
-                raise HiggsfieldRealGenerationDisabledError(
-                    "HiggsfieldClient.run() only executes the exact read-only "
-                    "cost-estimation form (Phase P3.85): generate cost "
-                    "<job_type> [--prompt] [--duration] [--resolution] "
-                    "[--aspect-ratio].",
-                    reasons=cost_violations,
-                )
-        if verb == ("account", "transactions"):
-            transactions_violations = _account_transactions_violations(args)
-            if transactions_violations:
-                raise HiggsfieldRealGenerationDisabledError(
-                    "HiggsfieldClient.run() only executes the canonical read-only "
-                    "form (Phase P3.86-C): account transactions [--size <1..100>] "
-                    "[--cursor <token>].",
-                    reasons=transactions_violations,
-                )
-        if self.command is None:
-            # Phase P3.105 (F8-2) : source absente ou invalide -- aucun repli.
-            raise HiggsfieldCLINotFoundError(
-                f"Higgsfield CLI not configured ({self.command_source}): "
-                f"{self.command_error}. No process started."
-            )
-        if _is_shell_interpreter(self.command):
-            raise HiggsfieldRealGenerationDisabledError(
-                "HiggsfieldClient.run() never launches a command interpreter as "
-                "the Higgsfield CLI (Phase P3.105): it would re-parse the "
-                "arguments exactly like the refused cmd.exe fallback (P3.92).",
-                reasons=[f"shell_interpreter_refused: {self.command!r}"],
-            )
-        if self._direct_invocation is None and _runs_through_cmd_exe(self.command):
-            raise HiggsfieldRealGenerationDisabledError(
-                "HiggsfieldClient.run() never executes the Higgsfield CLI through "
-                "a .cmd/.bat shim (Phase P3.92-R1): cmd.exe would re-parse the "
-                "arguments and could chain a generation command outside the "
-                "read-only allowlist. Only the resolved direct Node.js "
-                "invocation (npm layout) is executed.",
-                reasons=[f"cmd_exe_fallback_refused: {self.command!r}"],
-            )
-
-        base_command = self._direct_invocation or [self.command]
-        if self._direct_invocation is not None and not _is_node_exe(base_command[0]):
-            raise HiggsfieldRealGenerationDisabledError(
-                "HiggsfieldClient.run() only launches the direct invocation "
-                "through a real node.exe (Phase P3.92-R2): a node.cmd/node.bat "
-                "or any other wrapper resolved on PATH would run through "
-                "cmd.exe and could chain a generation command outside the "
-                "read-only allowlist.",
-                reasons=[f"direct_invocation_interpreter_refused: {base_command[0]!r}"],
-            )
-        command = [*base_command, "--json", *args]
-        effective_timeout = timeout if timeout is not None else self.timeout
-
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=effective_timeout,
-                shell=False,
-            )
-        except FileNotFoundError as error:
-            raise HiggsfieldCLINotFoundError(
-                f"Higgsfield CLI executable not found: {command[0]}"
-            ) from error
-        except subprocess.TimeoutExpired as error:
-            raise HiggsfieldTimeoutError(
-                f"Higgsfield CLI command timed out after "
-                f"{effective_timeout}s: {' '.join(args)}"
-            ) from error
-        except OSError as error:
-            # Phase P3.105-STEP-3 : lancement refusé par le système (format
-            # invalide WinError 193, nom invalide WinError 123, accès
-            # refusé...) -- distinct de « introuvable » ci-dessus. Aucun
-            # processus n'a démarré : échec de commande typé, sans code de
-            # sortie, cause d'origine chaînée.
-            raise HiggsfieldCommandError(
-                f"Higgsfield CLI executable could not be launched: "
-                f"{command[0]} ({type(error).__name__}: {error})",
-                exit_code=None,
-            ) from error
-
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
-
-        if result.returncode != 0:
-            combined = stderr or stdout
-
-            if self._looks_like_auth_failure(combined):
-                raise HiggsfieldAuthenticationError(
-                    "Higgsfield CLI authentication failure. "
-                    "Run 'higgsfield auth login' to re-authenticate."
-                )
-
-            raise HiggsfieldCommandError(
-                f"Higgsfield CLI command failed (exit code "
-                f"{result.returncode}): {' '.join(args)}",
-                exit_code=result.returncode,
-                stderr=stderr,
-            )
-
-        if not stdout:
-            return None
-
-        try:
-            return json.loads(stdout)
-        except json.JSONDecodeError as error:
-            raise HiggsfieldInvalidResponseError(
-                f"Higgsfield CLI returned non-JSON output for: "
-                f"{' '.join(args)}"
-            ) from error
-
-    @classmethod
-    def _looks_like_auth_failure(cls, text: str) -> bool:
-        lowered = text.lower()
-        return any(marker in lowered for marker in cls._AUTH_FAILURE_MARKERS)
+        self.build_argv(*args)
+        raise HiggsfieldRealGenerationDisabledError(
+            "HiggsfieldClient.run() starts no process while Provider = CLOSED: "
+            "not even a read-only Higgsfield CLI command is executed. Reopening "
+            "requires a separate written decision and step "
+            "(docs/phase_a_real_generation_decision.md).",
+            reasons=["provider_closed_no_cli_process"],
+        )
 
     # ========================================================
-    # MÉTHODES EXISTANTES (inchangées — signature et comportement V1)
+    # MÉTHODES V1 (signatures inchangées) — FERMÉES : chacune
+    # passe par run(), qui refuse (Provider = CLOSED)
     # ========================================================
 
     def list_workflows(self) -> Any:
@@ -600,7 +561,8 @@ class HiggsfieldClient:
         return self.run(*args)
 
     # ========================================================
-    # NOUVELLES MÉTHODES — lecture seule (Phase C)
+    # MÉTHODES PHASE C (verbes CLI en lecture seule) — FERMÉES :
+    # chacune passe par run(), qui refuse (Provider = CLOSED)
     # ========================================================
 
     def list_models(self, video: bool = True) -> Any:
@@ -681,14 +643,5 @@ class HiggsfieldClient:
         )
 
 
-if __name__ == "__main__":
-    client = HiggsfieldClient()
-
-    print("Higgsfield Client - TEST")
-    print("-" * 40)
-
-    print("ACCOUNT:")
-    print(client.account_status())
-
-    print("\nWORKFLOWS:")
-    print(client.list_workflows())
+# Pas de bloc __main__ : tant que Provider = CLOSED, exécuter ce module ne
+# doit lancer aucune commande Higgsfield (tests/test_provider_egress_closure.py).

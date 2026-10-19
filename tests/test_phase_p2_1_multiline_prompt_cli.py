@@ -14,22 +14,24 @@ lever d'erreur — confirmé en lecture seule : un même prompt donnait
 modèle) réparti sur plusieurs lignes, à durée demandée identique (15s).
 
 Le correctif (HiggsfieldClient._resolve_direct_invocation) contourne le
-shim .cmd/cmd.exe en invoquant directement le vrai interpréteur Node.js
+shim .cmd/cmd.exe en ciblant directement le vrai interpréteur Node.js
 sur le script .js qu'il relaie, quand la disposition npm standard est
-détectée. Ces tests utilisent un VRAI sous-processus (aucun mock de
-subprocess.run) avec un faux shim + un faux "node" (l'interpréteur
-Python courant, qui exécute n'importe quel fichier texte qu'on lui
-donne, quelle que soit son extension) pour observer l'argv EXACT reçu
-par le "CLI" — sans jamais toucher au vrai CLI Higgsfield, au réseau,
-ni consommer le moindre crédit.
+détectée.
+
+Provider = CLOSED : `run()` ne lance plus aucun processus, pas même une
+lecture. Ces tests ne lancent donc plus de vrai sous-processus : ils
+vérifient l'argv EXACT avec la fonction pure `build_argv()` (une liste
+d'arguments séparés, le prompt multi-lignes restant UN seul élément), puis
+que `run()` et chaque lecture refusent. Chaque test tourne sous
+`no_egress()`, qui enregistre et refuse tout lancement de processus ou toute
+connexion (l'enregistrement doit rester vide) — sans jamais toucher au vrai
+CLI Higgsfield, au réseau, ni consommer le moindre crédit.
 
 Spécifique à Windows (os.name == "nt") : c'est précisément la
 plateforme où le bug existe. Ignoré ailleurs.
 """
 
-import json
 import os
-import shutil
 import sys
 import unittest
 from pathlib import Path
@@ -43,6 +45,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from integrations.higgsfield.client import HiggsfieldClient
 from integrations.higgsfield.errors import HiggsfieldRealGenerationDisabledError
+from tests.provider_closure_helpers import NoEgressTestCase
+
+PROVIDER_CLOSED = "provider_closed_no_cli_process"
 
 # Reproduit fidèlement le Master Prompt 005 réel : plusieurs dizaines de
 # lignes, sections multiples, exactement le type de contenu qui
@@ -93,25 +98,20 @@ _FAKE_NPM_SHIM_TEMPLATE = (
     '"%dp0%\\node_modules\\@higgsfield\\cli\\bin\\higgsfield.js"  %*\n'
 )
 
-_FAKE_ENTRY_SCRIPT = (
-    "import sys, json\n"
-    "print(json.dumps({'argv': sys.argv[1:]}))\n"
-)
-
-
 @unittest.skipUnless(
     os.name == "nt",
     "Le bug contourné est spécifique à l'invocation .cmd sous Windows.",
 )
-class TestWindowsCmdShimMultilinePromptBypass(unittest.TestCase):
+class TestWindowsCmdShimMultilinePromptBypass(NoEgressTestCase, unittest.TestCase):
     """
-    Fabrique un faux shim npm .cmd + un faux 'node' (l'interpréteur
-    Python courant) reproduisant exactement la disposition réelle
-    (node_modules/@higgsfield/cli/bin/higgsfield.js), pour observer via
-    un VRAI sous-processus l'argv effectivement reçu.
+    Fabrique un faux shim npm .cmd + un faux node.exe (fichier vide, jamais
+    lancé) reproduisant exactement la disposition réelle
+    (node_modules/@higgsfield/cli/bin/higgsfield.js), pour vérifier l'argv
+    construit par la fonction pure `build_argv()`.
     """
 
     def setUp(self):
+        super().setUp()
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
 
@@ -119,9 +119,8 @@ class TestWindowsCmdShimMultilinePromptBypass(unittest.TestCase):
 
         bin_dir = root / "node_modules" / "@higgsfield" / "cli" / "bin"
         bin_dir.mkdir(parents=True)
-        (bin_dir / "higgsfield.js").write_text(_FAKE_ENTRY_SCRIPT, encoding="utf-8")
-
-        shutil.copy2(sys.executable, root / "node.exe")
+        (bin_dir / "higgsfield.js").write_text("// fake entry\n", encoding="utf-8")
+        (root / "node.exe").write_text("", encoding="utf-8")
 
         self.shim_path = root / "higgsfield.cmd"
         self.shim_path.write_text(_FAKE_NPM_SHIM_TEMPLATE, encoding="utf-8")
@@ -133,24 +132,35 @@ class TestWindowsCmdShimMultilinePromptBypass(unittest.TestCase):
         self.assertTrue(self.client._direct_invocation[0].endswith("node.exe"))
         self.assertTrue(self.client._direct_invocation[1].endswith("higgsfield.js"))
 
+    def _cli_args(self, *args):
+        """argv validé (pur) après l'invocation Node directe ; rien n'est lancé."""
+
+        argv = self.client.build_argv(*args)
+        self.assertEqual(argv[:2], self.client._direct_invocation)
+        return argv[2:]
+
+    def _forwarded(self, call):
+        """Arguments qu'une lecture transmet à `run()` (remplacé : rien ne tourne)."""
+
+        forwarded = []
+        with patch.object(HiggsfieldClient, "run", lambda self, *args, **kwargs: forwarded.append(args)):
+            call()
+        self.assertEqual(len(forwarded), 1)
+        return forwarded[0]
+
     def test_short_prompt_arguments_are_correct(self):
-        result = self.client.run(
-            "generate", "cost", "seedance_2_0", "--prompt", "read-only cost check",
-        )
         self.assertEqual(
-            result["argv"],
+            self._cli_args("generate", "cost", "seedance_2_0", "--prompt", "read-only cost check"),
             ["--json", "generate", "cost", "seedance_2_0", "--prompt", "read-only cost check"],
         )
 
     def test_long_single_line_prompt_arguments_are_correct(self):
         long_single_line = "cinematic shot of a character " * 230
-        result = self.client.run(
-            "generate", "cost", "seedance_2_0", "--prompt", long_single_line,
-        )
-        self.assertEqual(result["argv"][-1], long_single_line)
+        argv = self._cli_args("generate", "cost", "seedance_2_0", "--prompt", long_single_line)
+        self.assertEqual(argv[-1], long_single_line)
 
     def test_multiline_prompt_and_duration_stay_distinct_and_correct(self):
-        result = self.client.run(
+        argv = self._cli_args(
             "generate",
             "cost",
             "seedance_2_0",
@@ -165,7 +175,7 @@ class TestWindowsCmdShimMultilinePromptBypass(unittest.TestCase):
         )
 
         self.assertEqual(
-            result["argv"],
+            argv,
             [
                 "--json",
                 "generate",
@@ -184,41 +194,57 @@ class TestWindowsCmdShimMultilinePromptBypass(unittest.TestCase):
 
         # Le point de rupture historique : le prompt ne doit JAMAIS être
         # tronqué à sa première ligne.
-        self.assertIn("\n", result["argv"][5])
-        self.assertEqual(result["argv"][5], REALISTIC_MULTILINE_PROMPT)
+        self.assertIn("\n", argv[5])
+        self.assertEqual(argv[5], REALISTIC_MULTILINE_PROMPT)
 
         # --duration doit rester une paire (flag, valeur) distincte,
         # jamais absorbée dans le prompt ni perdue.
-        self.assertIn("--duration", result["argv"])
-        duration_index = result["argv"].index("--duration")
-        self.assertEqual(result["argv"][duration_index + 1], "15")
+        duration_index = argv.index("--duration")
+        self.assertEqual(argv[duration_index + 1], "15")
 
     def test_estimate_cost_via_client_uses_same_correct_argv(self):
-        with patch.object(HiggsfieldClient, "run", wraps=self.client.run) as spy:
-            self.client.estimate_cost(
-                job_type="seedance_2_0",
-                prompt=REALISTIC_MULTILINE_PROMPT,
-                duration=15,
-                resolution="720p",
-                aspect_ratio="9:16",
-            )
+        call_args = self._forwarded(lambda: self.client.estimate_cost(
+            job_type="seedance_2_0",
+            prompt=REALISTIC_MULTILINE_PROMPT,
+            duration=15,
+            resolution="720p",
+            aspect_ratio="9:16",
+        ))
 
-        call_args = spy.call_args.args
         self.assertIn(REALISTIC_MULTILINE_PROMPT, call_args)
         self.assertIn("--duration", call_args)
         self.assertIn("15", call_args)
+        self.assertEqual(self._cli_args(*call_args)[1:], list(call_args))
 
     def test_account_status_not_regressed_by_the_bypass(self):
-        result = self.client.account_status()
-        self.assertEqual(result["argv"], ["--json", "account", "status"])
+        call_args = self._forwarded(self.client.account_status)
+        self.assertEqual(self._cli_args(*call_args), ["--json", "account", "status"])
 
     def test_get_model_not_regressed_by_the_bypass(self):
-        result = self.client.get_model("seedance_2_0")
-        self.assertEqual(result["argv"], ["--json", "model", "get", "seedance_2_0"])
+        call_args = self._forwarded(lambda: self.client.get_model("seedance_2_0"))
+        self.assertEqual(self._cli_args(*call_args), ["--json", "model", "get", "seedance_2_0"])
+
+    def test_run_and_reads_refuse_without_any_process(self):
+        calls = {
+            "run multiline cost": lambda: self.client.run(
+                "generate", "cost", "seedance_2_0", "--prompt", REALISTIC_MULTILINE_PROMPT, "--duration", "15",
+            ),
+            "estimate_cost": lambda: self.client.estimate_cost(
+                job_type="seedance_2_0", prompt=REALISTIC_MULTILINE_PROMPT, duration=15,
+            ),
+            "account_status": self.client.account_status,
+            "get_model": lambda: self.client.get_model("seedance_2_0"),
+        }
+        for label, call in calls.items():
+            with self.subTest(call=label):
+                with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+                    call()
+                self.assertEqual(ctx.exception.reasons, [PROVIDER_CLOSED])
+        self.assertEqual(self.egress, [])
 
 
 @unittest.skipUnless(os.name == "nt", "Comportement de repli spécifique à Windows.")
-class TestWindowsCmdShimBypassSafeFallback(unittest.TestCase):
+class TestWindowsCmdShimBypassSafeFallback(NoEgressTestCase, unittest.TestCase):
     """Le contournement ne doit JAMAIS s'activer hors de la disposition npm connue."""
 
     def test_unrelated_cmd_file_falls_back_to_original_behaviour(self):
@@ -231,13 +257,13 @@ class TestWindowsCmdShimBypassSafeFallback(unittest.TestCase):
             self.assertIsNone(client._direct_invocation)
 
             # Phase P3.92-R1 (F-1) : l'ancien repli exécutait ce .cmd via
-            # cmd.exe (injection possible) -- il est désormais refusé,
-            # avant tout subprocess.
-            with patch("subprocess.run") as mock_run:
-                with self.assertRaises(HiggsfieldRealGenerationDisabledError):
-                    client.run("account", "status")
+            # cmd.exe (injection possible) -- il est désormais refusé dès
+            # la validation, avant tout processus.
+            with self.assertRaises(HiggsfieldRealGenerationDisabledError) as ctx:
+                client.run("account", "status")
+            self.assertTrue(ctx.exception.reasons[0].startswith("cmd_exe_fallback_refused"))
 
-                mock_run.assert_not_called()
+            self.assertEqual(self.egress, [])
 
     def test_bypass_never_triggers_off_windows(self):
         with patch("integrations.higgsfield.client.os.name", "posix"):

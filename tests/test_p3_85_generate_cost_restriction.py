@@ -10,18 +10,16 @@ harmlessness cannot be proven offline (NOT PROVEN). P3.85 restricts
 
     generate cost <job_type> [--prompt v] [--duration v] [--resolution v] [--aspect-ratio v]
 
-Everything else is refused BEFORE any process starts. Every test replaces the
-client module's `subprocess` with a recording fake: no network, no credits.
+Everything else is refused before any command is built. Provider = CLOSED:
+even an accepted form is never executed -- `run()` validates with the pure
+`build_argv()` then refuses. Every test runs under `no_egress()`.
 """
 
-import json
 import os
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +32,9 @@ from integrations.higgsfield.client import HiggsfieldClient
 from integrations.higgsfield.errors import HiggsfieldError, HiggsfieldRealGenerationDisabledError
 from integrations.higgsfield.provider import HiggsfieldProvider
 from agents.generation_cost_service import CostEstimationStatus, GenerationCostService
+from tests.provider_closure_helpers import NoEgressTestCase
+
+PROVIDER_CLOSED = "provider_closed_no_cli_process"
 
 MEDIA_FLAGS = ("--image", "--image-url", "--image-references", "--start-image", "--end-image", "--video",
                "--video-input", "--video-references", "--audio", "--audio-references", "--media", "--avatar",
@@ -70,33 +71,39 @@ def setUpModule():
     _FIXTURE_NODE_EXE = root / "node.exe"
 
 
-class _FakeSubprocess(types.ModuleType):
-    TimeoutExpired = client_mod.subprocess.TimeoutExpired
-
-    def __init__(self):
-        super().__init__("fake_subprocess")
-        self.calls = []
-
-    def run(self, command, **kwargs):
-        self.calls.append(tuple(command[command.index("--json") + 1:]))
-        return SimpleNamespace(returncode=0, stdout=json.dumps({"credits": 67.5}), stderr="")
-
-
-class _CostCase(unittest.TestCase):
+class _CostCase(NoEgressTestCase, unittest.TestCase):
     def setUp(self):
-        self.fake = _FakeSubprocess()
-        patcher = mock.patch.object(client_mod, "subprocess", self.fake)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        super().setUp()
         self.client = HiggsfieldClient()
 
+    def argv(self, *args):
+        """Validated argv after `--json` (pure: no process)."""
+
+        argv = self.client.build_argv(*args)
+        return tuple(argv[argv.index("--json") + 1:])
+
     def assertRefusedBeforeProcess(self, *args):
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as context:
+            self.client.build_argv(*args)
         with self.assertRaises(HiggsfieldRealGenerationDisabledError):
             self.client.run(*args)
-        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(self.egress, [])
+        return context.exception
+
+    def assertClosed(self, call):
+        with self.assertRaises(HiggsfieldRealGenerationDisabledError) as context:
+            call()
+        self.assertEqual(context.exception.reasons, [PROVIDER_CLOSED])
+        self.assertEqual(self.egress, [])
 
 
 class TestAllowedEstimationForms(_CostCase):
+    def _forwarded(self, call):
+        forwarded = []
+        with mock.patch.object(HiggsfieldClient, "run", lambda self, *args, **kwargs: forwarded.append(args)):
+            call()
+        return forwarded
+
     def test_estimate_cost_builds_the_exact_estimation_request(self):
         cases = [
             ({}, ("generate", "cost", "seedance_2_0", "--prompt", "P")),
@@ -106,25 +113,20 @@ class TestAllowedEstimationForms(_CostCase):
         ]
         for kwargs, expected in cases:
             with self.subTest(kwargs=kwargs):
-                self.fake.calls.clear()
-                self.assertEqual(self.client.estimate_cost("seedance_2_0", "P", **kwargs), {"credits": 67.5})
-                self.assertEqual(self.fake.calls, [expected])
+                self.assertEqual(self._forwarded(lambda: self.client.estimate_cost("seedance_2_0", "P", **kwargs)), [expected])
+                self.assertEqual(self.argv(*expected), expected)
+                self.assertClosed(lambda: self.client.estimate_cost("seedance_2_0", "P", **kwargs))
 
     def test_prompt_values_are_opaque_text(self):
         for prompt in ("- scene one", "--image ./x.png", "generate create", "multi\nline"):
             with self.subTest(prompt=prompt):
-                self.fake.calls.clear()
-                self.client.estimate_cost("seedance_2_0", prompt, duration=15)
-                self.assertEqual(self.fake.calls, [("generate", "cost", "seedance_2_0", "--prompt", prompt, "--duration", "15")])
+                expected = ("generate", "cost", "seedance_2_0", "--prompt", prompt, "--duration", "15")
+                self.assertEqual(self._forwarded(lambda: self.client.estimate_cost("seedance_2_0", prompt, duration=15)), [expected])
+                self.assertEqual(self.argv(*expected), expected)
 
-    def test_bare_estimate_without_prompt_stays_allowed(self):
-        self.assertEqual(self.client.run("generate", "cost", "seedance_2_0"), {"credits": 67.5})
-
-    def test_every_accepted_form_is_still_an_estimation(self):
-        self.client.estimate_cost("seedance_2_0", "P", duration=15, resolution="720p", aspect_ratio="9:16")
-        self.client.run("generate", "cost", "seedance_2_0")
-        self.assertTrue(self.fake.calls)
-        self.assertTrue(all(call[:2] == ("generate", "cost") for call in self.fake.calls))
+    def test_bare_estimate_without_prompt_stays_a_valid_form_but_is_closed(self):
+        self.assertEqual(self.argv("generate", "cost", "seedance_2_0"), ("generate", "cost", "seedance_2_0"))
+        self.assertClosed(lambda: self.client.run("generate", "cost", "seedance_2_0"))
 
 
 class TestRefusedEstimationForms(_CostCase):
@@ -166,22 +168,21 @@ class TestRefusedEstimationForms(_CostCase):
                 self.assertRefusedBeforeProcess(*args)
 
 
-class TestFailClosedThroughTheP2CostPath(unittest.TestCase):
-    def test_refused_estimation_surfaces_as_cost_error_never_as_a_cost(self):
-        fake = _FakeSubprocess()
-        with mock.patch.object(client_mod, "subprocess", fake):
-            client = HiggsfieldClient()
-            original = client.estimate_cost
-            client.estimate_cost = lambda *a, **k: client.run("generate", "cost", "seedance_2_0", "--image", "./first.png")
-            result = GenerationCostService(HiggsfieldProvider(client=client)).estimate(job_type="seedance_2_0", prompt="P", duration=15)
-            self.assertIsInstance(HiggsfieldRealGenerationDisabledError("x"), HiggsfieldError)
-            self.assertEqual(result.status, CostEstimationStatus.ERROR)
-            client.estimate_cost = original
-            self.assertEqual(
-                GenerationCostService(HiggsfieldProvider(client=client)).estimate(job_type="seedance_2_0", prompt="P", duration=15).status,
-                CostEstimationStatus.KNOWN,
-            )
-        self.assertEqual(fake.calls, [("generate", "cost", "seedance_2_0", "--prompt", "P", "--duration", "15")])
+class TestFailClosedThroughTheP2CostPath(NoEgressTestCase, unittest.TestCase):
+    def test_closed_estimation_surfaces_as_cost_error_never_as_a_cost(self):
+        client = HiggsfieldClient()
+        self.assertIsInstance(HiggsfieldRealGenerationDisabledError("x"), HiggsfieldError)
+        for estimate in (
+            lambda *a, **k: client.run("generate", "cost", "seedance_2_0", "--image", "./first.png"),
+            client.estimate_cost,
+        ):
+            with self.subTest(estimate=estimate):
+                client.estimate_cost = estimate
+                result = GenerationCostService(HiggsfieldProvider(client=client)).estimate(
+                    job_type="seedance_2_0", prompt="P", duration=15
+                )
+                self.assertEqual(result.status, CostEstimationStatus.ERROR)
+        self.assertEqual(self.egress, [])
 
 
 class TestLockDStillIntact(_CostCase):

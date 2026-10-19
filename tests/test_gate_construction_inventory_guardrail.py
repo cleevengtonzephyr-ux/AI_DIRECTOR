@@ -39,7 +39,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # any OTHER production construction site, safe or not, is itself new
 # and must be reviewed (this test fails loud rather than silently
 # accepting a second "safe-looking" site it hasn't seen before).
-KNOWN_SAFE_PRODUCTION_SITE = ("director.py", 242)
+KNOWN_SAFE_PRODUCTION_SITE = ("director.py", 227)
 
 REQUIRED_KWARGS = {"executed_request_store", "identity_lock"}
 

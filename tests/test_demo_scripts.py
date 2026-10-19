@@ -5,10 +5,10 @@ demo_test.run_demo() est appelé directement : il n'utilise QUE
 MockHiggsfieldProvider en interne, donc aucun appel réseau/CLI n'est
 jamais déclenché par ce test, quel que soit l'état du compte réel.
 
-higgsfield_check.py n'est qu'IMPORTÉ (jamais son main() appelé) : ce
-script est un outil interactif read-only destiné à un lancement manuel
-(`python scripts/higgsfield_check.py`), pas à la suite de tests
-automatisée hors-ligne.
+higgsfield_check.py n'est qu'IMPORTÉ ici (son main() n'est pas appelé
+par ce module). Tant que Provider = CLOSED, ce script ne contacte plus
+Higgsfield ; son exécution est vérifiée sous sentinelle par
+tests/test_provider_egress_closure.py.
 """
 
 import importlib.util

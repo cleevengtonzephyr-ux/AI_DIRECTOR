@@ -23,7 +23,7 @@ USER
   -> USER
 ```
 
-- **HiggsfieldClient** (`integrations/higgsfield/client.py`) est le seul point de contact avec le CLI Higgsfield installé localement (arguments toujours passés en liste, `shell=False`, jamais d'injection shell possible).
+- **HiggsfieldClient** (`integrations/higgsfield/client.py`) est le seul point de contact prévu avec le CLI Higgsfield installé localement. Tant que Provider = CLOSED, il ne lance **aucun** processus, pas même une lecture : `run()` valide la commande (argv construit par la fonction pure `build_cli_argv()`, arguments en liste, jamais une chaîne shell) puis refuse toujours.
 - **HiggsfieldProvider** masque le CLI derrière un contrat stable (`BaseHiggsfieldProvider`), implémenté aussi par **MockHiggsfieldProvider** (100 % en mémoire, utilisé par tous les tests de génération).
 - **GenerationApprovalGate** est le verrou central : aucune génération n'est jamais approuvée automatiquement, un coût inconnu ne débloque jamais silencieusement l'exécution, et une requête déjà exécutée est rejetée (`ALREADY_EXECUTED`).
 - Le modèle vidéo par défaut est **`seedance_2_0`**, mais reste un paramètre explicite partout (`VideoAgent`, `TaskManager`) — jamais déduit implicitement d'un ancien identifiant de workflow V1.
@@ -39,7 +39,7 @@ Le nouveau pipeline (Phases B-N, P2, P3) est la seule chaîne d'autorité réell
 
 ## Scripts
 
-- **`python scripts/higgsfield_check.py`** — vérification de connectivité Higgsfield en lecture seule (compte, workflows). Ne crée aucun job, ne consomme aucun crédit.
+- **`python scripts/higgsfield_check.py`** — affiche l'état du connecteur Higgsfield sans le contacter : tant que Provider = CLOSED, aucun point d'entrée du dépôt ne lance la CLI Higgsfield, même en lecture seule (`tests/test_provider_egress_closure.py`). Ne crée aucun job, ne consomme aucun crédit, n'ouvre aucune connexion.
 - **`python scripts/demo_test.py`** — démonstration de bout en bout du pipeline complet via `MockHiggsfieldProvider` (aucun réseau, aucun CLI réel, aucun crédit). Illustre 3 scénarios : sans approbation (`NEEDS_APPROVAL`), approuvé (`EXECUTED_PASS`), budget insuffisant (`BLOCKED`).
 - **`python scripts/architecture_audit.py`** — audit ponctuel, en lecture seule, de la cartographie architecturale canonique (`agents/canonical_architecture_contract.py`) contre l'état réel du repository, via le Architecture Drift Detector (`agents/architecture_drift_detector.py`). Code de sortie `0` = `NO_DRIFT`, `1` = `DRIFT_DETECTED`, `2` = `ANALYSIS_INCOMPLETE`. Ce même contrôle s'exécute déjà automatiquement à chaque lancement de la suite de tests (`tests/test_architecture_drift_detector.py`, `tests/test_architecture_contract_integration.py`) ; ce script sert uniquement à l'invoquer isolément.
 
@@ -66,6 +66,7 @@ Intégration continue : le workflow GitHub Actions `.github/workflows/ci.yml` ex
 ## Sécurité
 
 - `HiggsfieldProvider.create_job()` (réel) lève systématiquement `HiggsfieldRealGenerationDisabledError` — ce garde-fou est indépendant de toute autre logique (Approval Gate, budget) et n'a jamais été désactivé au cours du développement.
+- **Provider = CLOSED, aucune sortie** : aucun point d'entrée ne lance la CLI Higgsfield ni n'ouvre de connexion vers Higgsfield, même en lecture seule (compte, solde, modèles, coût, statut). `HiggsfieldClient.run()` et `HttpsTransport.send()` refusent toujours, et la Gate bloque le vrai Provider avant tout appel, `get_model()` compris. Voir [`docs/phase_a_real_generation_decision.md`](docs/phase_a_real_generation_decision.md) et `tests/test_provider_egress_closure.py`.
 - Aucune approbation n'est jamais déduite automatiquement (`approved=False` par défaut à chaque étage : `GenerationRequest`, `VideoAgent`, `TaskManager`, `AIDirector`).
 - Un coût inconnu ne débloque jamais silencieusement l'exécution (`NEEDS_APPROVAL` explicite).
 - Aucun résultat n'est jamais présenté comme un succès s'il n'a pas été réellement exécuté (`FinalReportStatus.NOT_EXECUTED` structurellement disjoint des statuts `EXECUTED_*`).

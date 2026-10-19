@@ -474,8 +474,36 @@ def _provider_activation_violations(
     return reasons
 
 
+def provider_closed_reasons(provider: Any) -> List[str]:
+    """Provider = CLOSED (docs/phase_a_real_generation_decision.md) -- un
+    Provider adossé au vrai `HiggsfieldClient` (type réel, sous-classes
+    comprises ; un double de test n'en est pas un) doit être refusé AVANT
+    tout appel : ni `get_model()`, ni le coût, ni le solde, ni aucune
+    autre lecture. Le client refuse de toute façon tout processus ; la
+    Gate appelle cette fonction en premier pour fixer l'ordre sur le
+    chemin réel. Un client illisible est traité comme réel (fermé). Ne
+    lève jamais d'exception."""
+
+    try:
+        real_client = issubclass(type(getattr(provider, "client", None)), HiggsfieldClient)
+    except Exception:
+        real_client = True
+    if not real_client:
+        return []
+    return [
+        f"Provider = CLOSED (NO-GO, docs/phase_a_real_generation_decision.md): "
+        f"{type(provider).__name__} is backed by the real Higgsfield client; no "
+        f"provider call is made, not even a read-only one. Reopening requires a "
+        f"separate written decision and step."
+    ]
+
+
 class HiggsfieldProvider(BaseHiggsfieldProvider):
-    """Implémentation réelle du Provider, appuyée sur HiggsfieldClient."""
+    """Implémentation réelle du Provider, appuyée sur HiggsfieldClient.
+
+    Provider = CLOSED : chaque lecture passe par le client, qui refuse tout
+    processus ; la Gate refuse ce Provider avant même de l'appeler
+    (`provider_closed_reasons()`)."""
 
     def __init__(
         self,

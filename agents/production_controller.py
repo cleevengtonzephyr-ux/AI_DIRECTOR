@@ -125,5 +125,5 @@ def main():
     controller.display(decision)
 
 
-if __name__ == "__main__":
-    main()
+# Pas de bloc __main__ : tant que Provider = CLOSED, exécuter ce module ne
+# doit lancer aucune commande Higgsfield (tests/test_provider_egress_closure.py).
