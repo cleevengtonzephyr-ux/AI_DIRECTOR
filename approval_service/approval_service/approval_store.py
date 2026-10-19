@@ -4,17 +4,27 @@ One SQLite file from the standard library holds the approval requests with
 their single immutable statement, the enrolled credentials, an
 administrator-attested registry of principals, approvers and GitHub
 accounts, and a minimal append-only journal. The store exposes only
-``initialize``, ``create_request``, ``approve``, ``expire_request`` and
-``revoke_credential``.
+``initialize``, ``create_request``, ``approve``, ``expire_request`` and four
+revocations: ``revoke_credential``, ``revoke_account``, ``revoke_approver``
+and ``revoke_principal``.
 
 Each request persists the signed ``run_actor_id`` (a numeric GitHub account
 ID, never the ``actor`` login) and the two principals compared when it was
 created; creation and approval both re-check that account separation. That
 separation is only attested by the administrator: it does not prove that two
 different people are involved. The store never consumes an approval, never
-talks to the Gate or a provider, and enrolls or revokes no registry entry.
+talks to the Gate or a provider, and enrolls no credential or registry entry.
 An ``APPROVED`` request authorizes nothing: G1 D-5 is unresolved and no
 future consumption may be built on this state until it is.
+
+Revocations are final. Revoking a GitHub account, an approver or a principal
+moves every PENDING or APPROVED request naming it to REVOKED in the same
+transaction; revoking a credential does so for the APPROVED requests it
+approved, since its approver may still use another credential. These methods
+are transactional primitives, not an administration boundary, and must not
+be exposed as one in a deployment: the store cannot tell who calls them and
+records no author, and any process that can call them or write the file can
+revoke.
 
 The database must stay on a local file system and be opened only through
 ``sqlite3``: WAL needs shared memory and working locks, and on POSIX closing
@@ -28,9 +38,11 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import stat
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -53,7 +65,7 @@ from approval_service.webauthn_verifier import (
     WebAuthnVerifier,
 )
 
-SCHEMA_VERSION = 2  # no migration: any other version is refused
+SCHEMA_VERSION = 3  # no migration: any other version is refused
 APPLICATION_ID = 0x41444732  # "ADG2"
 # SQLITE_BUSY: wait at most this long for another writer before refusing.
 DEFAULT_BUSY_TIMEOUT_SECONDS = 5.0
@@ -67,6 +79,8 @@ _SEPARATION_REFUSED = "account separation between the run and the approver is no
 # OIDC `actor_id` assumption (positive decimal string, no leading zero).
 _REGISTRY_ID_CHECK = "{0} GLOB '[A-Za-z0-9]*' AND {0} NOT GLOB '*[^A-Za-z0-9_.:-]*' AND length({0}) <= 128"
 _ACCOUNT_ID_CHECK = "{0} GLOB '[1-9]*' AND {0} NOT GLOB '*[^0-9]*'"
+_REGISTRY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_ACCOUNT_ID = re.compile(r"^[1-9][0-9]*$")
 _REVOCABLE = """state TEXT NOT NULL CHECK (state IN ('ACTIVE', 'REVOKED')),
         revoked_at_ms INTEGER,
         CHECK ((state = 'REVOKED') = (revoked_at_ms IS NOT NULL))"""
@@ -163,7 +177,7 @@ _SCHEMA = (
             (state = 'PENDING' AND approved_at_ms IS NULL AND closed_at_ms IS NULL)
             OR (state = 'APPROVED' AND approved_at_ms IS NOT NULL AND closed_at_ms IS NULL)
             OR (state = 'EXPIRED' AND approved_at_ms IS NULL AND closed_at_ms IS NOT NULL)
-            OR (state = 'REVOKED' AND approved_at_ms IS NOT NULL AND closed_at_ms IS NOT NULL)
+            OR (state = 'REVOKED' AND closed_at_ms IS NOT NULL)
         )
     ) STRICT""",
     """CREATE INDEX approval_requests_by_credential ON approval_requests (approved_credential_id)""",
@@ -172,15 +186,25 @@ _SCHEMA = (
         at_ms INTEGER NOT NULL,
         event TEXT NOT NULL CHECK (event IN (
             'REQUEST_CREATED', 'REQUEST_APPROVED', 'REQUEST_EXPIRED',
-            'APPROVAL_REVOKED', 'CREDENTIAL_REVOKED', 'COUNTER_SIGNAL'
+            'APPROVAL_REVOKED', 'CREDENTIAL_REVOKED', 'COUNTER_SIGNAL',
+            'REGISTRY_ENTRY_REVOKED', 'REQUEST_REVOKED'
         )),
         approval_id TEXT,
         credential_sha256 TEXT CHECK (credential_sha256 IS NULL OR length(credential_sha256) = 64),
         stored_sign_count INTEGER,
         presented_sign_count INTEGER,
+        registry_kind TEXT CHECK (registry_kind IS NULL OR registry_kind IN ('ACCOUNT', 'APPROVER', 'PRINCIPAL')),
+        registry_sha256 TEXT CHECK (
+            registry_sha256 IS NULL OR (length(registry_sha256) = 64 AND registry_sha256 NOT GLOB '*[^0-9a-f]*')
+        ),
         CHECK ((event = 'COUNTER_SIGNAL') = (
             approval_id IS NOT NULL AND credential_sha256 IS NOT NULL
             AND stored_sign_count IS NOT NULL AND presented_sign_count IS NOT NULL
+        )),
+        CHECK ((registry_kind IS NULL) = (registry_sha256 IS NULL)),
+        CHECK ((event IN ('REGISTRY_ENTRY_REVOKED', 'REQUEST_REVOKED')) = (registry_kind IS NOT NULL)),
+        CHECK (registry_kind IS NULL OR (
+            credential_sha256 IS NULL AND (approval_id IS NULL) = (event = 'REGISTRY_ENTRY_REVOKED')
         ))
     ) STRICT""",
     """CREATE UNIQUE INDEX journal_one_counter_signal
@@ -235,10 +259,12 @@ _SCHEMA = (
             run_actor_id, approver_id, actor_principal_id, approver_principal_id, separation_evidence,
             statement_json, statement_sha256, created_at_ms ON approval_requests
         BEGIN SELECT RAISE(ABORT, 'the approval statement is immutable'); END""",
+    # A revocation closes a PENDING or APPROVED request as it stands: a
+    # PENDING one keeps no approval, an APPROVED one keeps its own.
     """CREATE TRIGGER approval_requests_transitions BEFORE UPDATE ON approval_requests
         WHEN NOT (
             (OLD.state = 'PENDING' AND NEW.state IN ('APPROVED', 'EXPIRED'))
-            OR (OLD.state = 'APPROVED' AND NEW.state = 'REVOKED'
+            OR (OLD.state IN ('PENDING', 'APPROVED') AND NEW.state = 'REVOKED'
                 AND NEW.approved_at_ms IS OLD.approved_at_ms
                 AND NEW.approved_credential_id IS OLD.approved_credential_id)
         )
@@ -412,8 +438,13 @@ def _append_journal(
     credential_id: bytes | None = None,
     stored_sign_count: int | None = None,
     presented_sign_count: int | None = None,
+    registry_kind: str | None = None,
+    registry_id: str | None = None,
 ) -> None:
-    """Append one entry; credentials appear only as SHA-256 digests.
+    """Append one entry; credentials and registry entries appear only as SHA-256 digests.
+
+    A digest keeps raw IDs out of the journal but does not hide them: a
+    numeric account ID or a short pseudonym is found again by enumeration.
 
     Only COUNTER_SIGNAL has a uniqueness rule (one per request and
     credential). A repeated signal is skipped here: the replacement guard
@@ -421,15 +452,25 @@ def _append_journal(
     """
 
     credential_sha256 = None if credential_id is None else hashlib.sha256(credential_id).hexdigest()
+    registry_sha256 = None if registry_id is None else hashlib.sha256(registry_id.encode()).hexdigest()
     if event == "COUNTER_SIGNAL" and connection.execute(
         "SELECT 1 FROM journal WHERE event = 'COUNTER_SIGNAL' AND approval_id = ? AND credential_sha256 = ?",
         (approval_id, credential_sha256),
     ).fetchone():
         return
     connection.execute(
-        "INSERT INTO journal (at_ms, event, approval_id, credential_sha256, stored_sign_count, presented_sign_count)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (at_ms, event, approval_id, credential_sha256, stored_sign_count, presented_sign_count),
+        "INSERT INTO journal (at_ms, event, approval_id, credential_sha256, stored_sign_count, presented_sign_count,"
+        " registry_kind, registry_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            at_ms,
+            event,
+            approval_id,
+            credential_sha256,
+            stored_sign_count,
+            presented_sign_count,
+            registry_kind,
+            registry_sha256,
+        ),
     )
 
 
@@ -531,6 +572,53 @@ def _check_separation(connection: sqlite3.Connection, statement: ApprovalStateme
         raise ApprovalRefusedError(_SEPARATION_REFUSED) from None
 
 
+@dataclass(frozen=True, slots=True)
+class _RegistryRevocation:
+    """SQL of one revocable registry table; only ``name`` appears in messages."""
+
+    kind: str
+    name: str
+    key_format: re.Pattern[str]
+    lookup: str
+    revoke: str
+    # Predicate on approval_requests selecting the requests that name the row.
+    requests: str
+
+
+_REGISTRY_REVOCATIONS = {
+    revocation.kind: revocation
+    for revocation in (
+        _RegistryRevocation(
+            "ACCOUNT",
+            "GitHub account",
+            _ACCOUNT_ID,
+            "SELECT state FROM github_accounts WHERE account_id = :key",
+            "UPDATE github_accounts SET state = 'REVOKED', revoked_at_ms = :now"
+            " WHERE account_id = :key AND state = 'ACTIVE'",
+            "run_actor_id = :key",
+        ),
+        _RegistryRevocation(
+            "APPROVER",
+            "approver",
+            _REGISTRY_ID,
+            "SELECT state FROM approvers WHERE approver_id = :key",
+            "UPDATE approvers SET state = 'REVOKED', revoked_at_ms = :now"
+            " WHERE approver_id = :key AND state = 'ACTIVE'",
+            "approver_id = :key",
+        ),
+        _RegistryRevocation(
+            "PRINCIPAL",
+            "principal",
+            _REGISTRY_ID,
+            "SELECT state FROM principals WHERE principal_id = :key",
+            "UPDATE principals SET state = 'REVOKED', revoked_at_ms = :now"
+            " WHERE principal_id = :key AND state = 'ACTIVE'",
+            "actor_principal_id = :key OR approver_principal_id = :key",
+        ),
+    )
+}
+
+
 class _CredentialRows:
     """Resolve enrolled credentials inside the caller's open transaction."""
 
@@ -561,7 +649,9 @@ class ApprovalStore:
     Each operation opens its own connection, re-checks the file and schema,
     and writes inside one ``BEGIN IMMEDIATE`` transaction. Only two writes
     are committed on their own after a refused approval: the ``EXPIRED``
-    transition and a counter signal. The clock returns Unix milliseconds.
+    transition and a counter signal. A revocation closes the requests it
+    concerns in its own transaction, which therefore never interleaves with
+    an approval. The clock returns Unix milliseconds.
     """
 
     def __init__(
@@ -681,9 +771,10 @@ class ApprovalStore:
         recorded, each in its own committed transaction.
 
         The account separation is re-checked against the current registry and
-        must yield the principals persisted at creation. A revocation committed
-        after the approval does not undo it: no cascade exists here, so any
-        future consumption must re-validate the separation first.
+        must yield the principals persisted at creation. A later revocation
+        through this store moves the request to REVOKED; a registry row
+        changed in the file directly does not, so any future consumption
+        must still re-validate the separation first.
         """
 
         if type(approval_id) is not str or not approval_id:
@@ -790,9 +881,10 @@ class ApprovalStore:
     def revoke_credential(self, credential_id: bytes) -> bool:
         """Revoke a credential for good, with its still-APPROVED requests.
 
-        Returns ``False`` if it was already revoked. A clock moving backwards
-        does not block a revocation, which then records the last observed
-        instant; an unusable clock still refuses it.
+        Returns ``False``, without any write, if it was already revoked. A
+        clock moving backwards does not block a revocation, which then
+        records the last observed instant; an unusable clock still refuses
+        it. Not an administration boundary: the caller is not authenticated.
         """
 
         if (
@@ -801,14 +893,15 @@ class ApprovalStore:
         ):
             raise ApprovalRefusedError("credential ID is missing or malformed")
         with self._write_transaction() as connection:
-            now = self._observe_clock(connection, allow_regression=True)
             row = connection.execute(
                 "SELECT state FROM credentials WHERE credential_id = ?", (credential_id,)
             ).fetchone()
             if row is None:
                 raise ApprovalRefusedError("credential is not registered")
             if row[0] == "REVOKED":
+                # Already final: nothing is written, not even the observed clock.
                 return False
+            now = self._observe_clock(connection, allow_regression=True)
             connection.execute(
                 "UPDATE credentials SET state = 'REVOKED', revoked_at_ms = ?"
                 " WHERE credential_id = ? AND state = 'ACTIVE'",
@@ -833,6 +926,43 @@ class ApprovalStore:
                     connection, now, "APPROVAL_REVOKED", approval_id=approval_id, credential_id=credential_id
                 )
             return True
+
+    def revoke_account(self, account_id: str) -> bool:
+        """Revoke a GitHub account binding for good, with its open requests.
+
+        Every PENDING or APPROVED request run from this account becomes
+        REVOKED in the same transaction. ``False`` means it was already
+        revoked and nothing was written. Not an administration boundary: the
+        caller is not authenticated.
+        """
+
+        return self._revoke_registry_entry(_REGISTRY_REVOCATIONS["ACCOUNT"], account_id)
+
+    def revoke_approver(self, approver_id: str) -> bool:
+        """Revoke an approver for good, with the open requests addressed to it.
+
+        Every PENDING or APPROVED request naming this approver becomes
+        REVOKED in the same transaction. Its credentials keep their own
+        state: the account separation check refuses any approval through a
+        revoked approver. ``False`` means it was already revoked and nothing
+        was written. Not an administration boundary: the caller is not
+        authenticated.
+        """
+
+        return self._revoke_registry_entry(_REGISTRY_REVOCATIONS["APPROVER"], approver_id)
+
+    def revoke_principal(self, principal_id: str) -> bool:
+        """Revoke a principal for good, with the open requests on either side.
+
+        Every PENDING or APPROVED request whose run account or approver
+        belongs to this principal becomes REVOKED in the same transaction.
+        Its accounts, approvers and credentials keep their own state: the
+        account separation check refuses them through the revoked principal.
+        ``False`` means it was already revoked and nothing was written. Not
+        an administration boundary: the caller is not authenticated.
+        """
+
+        return self._revoke_registry_entry(_REGISTRY_REVOCATIONS["PRINCIPAL"], principal_id)
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -927,3 +1057,57 @@ class ApprovalStore:
                 )
         except ApprovalStoreError as error:
             refusal.add_note(f"the counter signal could not be recorded ({type(error).__name__})")
+
+    def _revoke_registry_entry(self, revocation: _RegistryRevocation, key: object) -> bool:
+        """Revoke one registry row and close the open requests that name it.
+
+        One ``BEGIN IMMEDIATE`` transaction moves the row to REVOKED, moves
+        every PENDING or APPROVED request naming it to REVOKED (a PENDING one
+        already due but not yet marked EXPIRED included), and journals the
+        row and each request by digest. Any failure, the journal's included,
+        rolls the whole revocation back. A row already revoked returns
+        ``False`` before any write. A clock moving backwards does not block
+        the revocation, which then records the last observed instant.
+        Messages name the kind of row only, never its ID.
+        """
+
+        if type(key) is not str or revocation.key_format.fullmatch(key) is None:
+            raise ApprovalRefusedError(f"{revocation.name} ID is missing or malformed")
+        with self._write_transaction() as connection:
+            row = connection.execute(revocation.lookup, {"key": key}).fetchone()
+            if row is None:
+                raise ApprovalRefusedError(f"{revocation.name} is not registered")
+            if row[0] == "REVOKED":
+                # Already final: nothing is written, not even the observed clock.
+                return False
+            now = self._observe_clock(connection, allow_regression=True)
+            if connection.execute(revocation.revoke, {"key": key, "now": now}).rowcount != 1:
+                raise ApprovalStoreUnavailableError(f"{revocation.name} changed during the transaction")
+            approvals = [
+                approval_id
+                for (approval_id,) in connection.execute(
+                    f"SELECT approval_id FROM approval_requests WHERE ({revocation.requests})"
+                    " AND state IN ('PENDING', 'APPROVED') ORDER BY approval_id",
+                    {"key": key},
+                )
+            ]
+            closed = connection.execute(
+                "UPDATE approval_requests SET state = 'REVOKED', closed_at_ms = :now"
+                f" WHERE ({revocation.requests}) AND state IN ('PENDING', 'APPROVED')",
+                {"key": key, "now": now},
+            ).rowcount
+            if closed != len(approvals):
+                raise ApprovalStoreUnavailableError("approval requests changed during the transaction")
+            _append_journal(
+                connection, now, "REGISTRY_ENTRY_REVOKED", registry_kind=revocation.kind, registry_id=key
+            )
+            for approval_id in approvals:
+                _append_journal(
+                    connection,
+                    now,
+                    "REQUEST_REVOKED",
+                    approval_id=approval_id,
+                    registry_kind=revocation.kind,
+                    registry_id=key,
+                )
+            return True

@@ -160,7 +160,10 @@ def _seed_default_registry(db_path):
 
 
 def _revoke(db_path, table, key_column, key, at_ms=NOW):
-    """Test-only revocation: the store itself has no revocation path for the registry."""
+    """Test-only revocation by direct SQL, as a process with file access could do.
+
+    It bypasses the store's revocation methods and therefore their cascade.
+    """
 
     connection = sqlite3.connect(db_path)
     try:
@@ -279,17 +282,24 @@ def _worker(mode, db_path, now, approval_id, response_path, sandbox):
         (sandbox / "stopped").write_text("1", encoding="utf-8")
         time.sleep(120)
 
-    if mode == "stop_before_commit":
+    def stop_after(last_event):
         original = store_module._append_journal
 
         def pausing(connection, at_ms, event, **kwargs):
             original(connection, at_ms, event, **kwargs)
-            if event == "REQUEST_APPROVED":
-                # Every approval write is done; COMMIT has not run yet.
+            if event == last_event:
+                # Every write of the operation is done; COMMIT has not run yet.
                 stop_here()
 
         store_module._append_journal = pausing
+
+    if mode == "stop_before_commit":
+        stop_after("REQUEST_APPROVED")
         store.approve(approval_id, response)
+    elif mode == "stop_revocation_before_commit":
+        # The test leaves one open request: its REQUEST_REVOKED is the last write.
+        stop_after("REQUEST_REVOKED")
+        store.revoke_approver(APPROVER_ID)
     elif mode == "stop_after_commit":
         store.approve(approval_id, response)
         stop_here()
@@ -302,6 +312,8 @@ def _worker(mode, db_path, now, approval_id, response_path, sandbox):
 
 
 class _StoreTestCase(unittest.TestCase):
+    TABLES = ("store_meta", "principals", "approvers", "github_accounts", "credentials", "approval_requests", "journal")
+
     @classmethod
     def setUpClass(cls):
         cls.credential = _new_credential("synthetic-credential-1")
@@ -321,6 +333,18 @@ class _StoreTestCase(unittest.TestCase):
             return connection.execute(sql, params).fetchall()
         finally:
             connection.close()
+
+    def _snapshot(self, db_path=None):
+        return {table: self._rows(f"SELECT * FROM {table} ORDER BY 1", db_path=db_path) for table in self.TABLES}
+
+    def _fresh_store(self, name):
+        """A new store with the default registry and `self.credential`."""
+
+        db_path = self.sandbox / f"{name}.sqlite3"
+        store = ApprovalStore.initialize(db_path, self.clock, busy_timeout_seconds=FAST_BUSY_TIMEOUT)
+        _seed_default_registry(db_path)
+        _seed_credential(db_path, self.credential)
+        return store, db_path
 
     def _tamper(self, approval_id, **columns):
         """Bypass the protecting triggers and restore them, as an attacker with file access could."""
@@ -380,7 +404,7 @@ class _StoreTestCase(unittest.TestCase):
 
 
 class TestInitializationAndOpening(_StoreTestCase):
-    def test_initialize_creates_a_private_wal_schema_version_2(self):
+    def test_initialize_creates_a_private_wal_schema_version_3(self):
         connection = sqlite3.connect(self.db_path)
         try:
             pragmas = {
@@ -390,7 +414,7 @@ class TestInitializationAndOpening(_StoreTestCase):
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
         finally:
             connection.close()
-        self.assertEqual(SCHEMA_VERSION, 2)
+        self.assertEqual(SCHEMA_VERSION, 3)
         self.assertEqual(
             pragmas, {"application_id": APPLICATION_ID, "user_version": SCHEMA_VERSION, "journal_mode": "wal"}
         )
@@ -438,7 +462,8 @@ class TestInitializationAndOpening(_StoreTestCase):
         changes = {
             "application_id": ["PRAGMA application_id = 1"],
             "schema version 1": ["PRAGMA user_version = 1"],
-            "schema version 3": ["PRAGMA user_version = 3"],
+            "schema version 2": ["PRAGMA user_version = 2"],
+            "schema version 4": ["PRAGMA user_version = 4"],
             "journal_mode": ["PRAGMA journal_mode = DELETE"],
             "objects": ["DROP TRIGGER approval_requests_transitions"],
             "registry table dropped": ["DROP TABLE github_accounts"],
@@ -844,8 +869,8 @@ class TestRevocationAndTransitions(_StoreTestCase):
         forbidden = {
             "APPROVED back to PENDING": "UPDATE approval_requests SET state = 'PENDING', approved_at_ms = NULL,"
             " approved_credential_id = NULL WHERE approval_id = 'approval-1'",
-            "PENDING straight to REVOKED": "UPDATE approval_requests SET state = 'REVOKED', approved_at_ms = 1,"
-            " approved_credential_id = NULL, closed_at_ms = 1 WHERE approval_id = 'approval-2'",
+            "PENDING revoked with an approval instant": "UPDATE approval_requests SET state = 'REVOKED',"
+            " approved_at_ms = 1, approved_credential_id = NULL, closed_at_ms = 1 WHERE approval_id = 'approval-2'",
             "EXPIRED back to PENDING": "UPDATE approval_requests SET state = 'PENDING', closed_at_ms = NULL"
             " WHERE approval_id = 'approval-3'",
             "statement rewritten": "UPDATE approval_requests SET statement_json = x'00'"
@@ -873,6 +898,82 @@ class TestRevocationAndTransitions(_StoreTestCase):
                 "UPDATE approval_requests SET state = 'APPROVED', closed_at_ms = NULL WHERE approval_id = 'approval-1'",
                 (),
             ))
+
+    def test_pending_to_revoked_is_only_a_closure_that_keeps_the_request_as_it_stands(self):
+        first = self._pending(1, self.credential)
+        self._pending(2)
+        self._pending(3)
+        self.store.approve("approval-1", _response(first, self.credential, sign_count=1))
+        self.clock.now = EXPIRES_AT
+        self.store.expire_request("approval-3")
+        credential = self.credential.credential_id.hex()
+        forbidden = {
+            "PENDING revoked without a closing instant": "UPDATE approval_requests SET state = 'REVOKED'"
+            " WHERE approval_id = 'approval-2'",
+            "PENDING revoked with a forged approval": "UPDATE approval_requests SET state = 'REVOKED',"
+            f" approved_at_ms = 1, approved_credential_id = x'{credential}', closed_at_ms = 1"
+            " WHERE approval_id = 'approval-2'",
+            "APPROVED revoked with its approval erased": "UPDATE approval_requests SET state = 'REVOKED',"
+            " approved_at_ms = NULL, approved_credential_id = NULL, closed_at_ms = 1 WHERE approval_id = 'approval-1'",
+            "APPROVED revoked with another approval instant": "UPDATE approval_requests SET state = 'REVOKED',"
+            " approved_at_ms = 2, closed_at_ms = 1 WHERE approval_id = 'approval-1'",
+            "EXPIRED revoked": "UPDATE approval_requests SET state = 'REVOKED' WHERE approval_id = 'approval-3'",
+        }
+        for name, sql in forbidden.items():
+            with self.subTest(change=name), self.assertRaises(sqlite3.IntegrityError):
+                self._write((sql, ()))
+
+        # The closure written by the store is accepted, then final.
+        self._write(
+            ("UPDATE approval_requests SET state = 'REVOKED', closed_at_ms = 1 WHERE approval_id = 'approval-2'", ())
+        )
+        self.assertEqual(
+            self._rows(
+                "SELECT state, approved_at_ms, approved_credential_id, closed_at_ms FROM approval_requests"
+                " WHERE approval_id = 'approval-2'"
+            ),
+            [("REVOKED", None, None, 1)],
+        )
+        reopened = {
+            "PENDING": "state = 'PENDING', closed_at_ms = NULL",
+            "APPROVED": f"state = 'APPROVED', approved_at_ms = 1, approved_credential_id = x'{credential}',"
+            " closed_at_ms = NULL",
+            "EXPIRED": "state = 'EXPIRED'",
+            "closing instant changed": "closed_at_ms = 2",
+        }
+        for name, assignments in reopened.items():
+            with self.subTest(revoked_to=name), self.assertRaises(sqlite3.IntegrityError):
+                self._write((f"UPDATE approval_requests SET {assignments} WHERE approval_id = 'approval-2'", ()))
+
+    def test_registry_digests_appear_only_on_registry_revocation_entries(self):
+        digest = hashlib.sha256(b"principal-other").hexdigest()
+        insert = (
+            "INSERT INTO journal (at_ms, event, approval_id, credential_sha256, registry_kind, registry_sha256)"
+            " VALUES (1, ?, ?, ?, ?, ?)"
+        )
+        forbidden = {
+            "entry revocation naming a request": ("REGISTRY_ENTRY_REVOKED", "approval-1", None, "PRINCIPAL", digest),
+            "entry revocation without a digest": ("REGISTRY_ENTRY_REVOKED", None, None, "PRINCIPAL", None),
+            "entry revocation without a kind": ("REGISTRY_ENTRY_REVOKED", None, None, None, digest),
+            "entry revocation with a credential": ("REGISTRY_ENTRY_REVOKED", None, digest, "PRINCIPAL", digest),
+            "request revocation without a request": ("REQUEST_REVOKED", None, None, "APPROVER", digest),
+            "request revocation with a credential": ("REQUEST_REVOKED", "approval-1", digest, "APPROVER", digest),
+            "unknown kind": ("REGISTRY_ENTRY_REVOKED", None, None, "CREDENTIAL", digest),
+            "raw ID instead of a digest": ("REGISTRY_ENTRY_REVOKED", None, None, "PRINCIPAL", "principal-other"),
+            "upper-case digest": ("REGISTRY_ENTRY_REVOKED", None, None, "PRINCIPAL", digest.upper()),
+            "registry fields on another event": ("REQUEST_CREATED", "approval-1", None, "ACCOUNT", digest),
+            "credential revocation with registry fields": ("CREDENTIAL_REVOKED", None, digest, "APPROVER", digest),
+        }
+        journal = self._rows("SELECT * FROM journal ORDER BY sequence")
+        for name, values in forbidden.items():
+            with self.subTest(entry=name), self.assertRaises(sqlite3.IntegrityError):
+                self._write((insert, values))
+        self.assertEqual(self._rows("SELECT * FROM journal ORDER BY sequence"), journal)
+        # Control: the shapes the store writes are accepted.
+        self._write(
+            (insert, ("REGISTRY_ENTRY_REVOKED", None, None, "PRINCIPAL", digest)),
+            (insert, ("REQUEST_REVOKED", "approval-1", None, "PRINCIPAL", digest)),
+        )
 
 
 class TestRowsAreNeverReplaced(_StoreTestCase):
@@ -920,7 +1021,7 @@ class TestRowsAreNeverReplaced(_StoreTestCase):
         journal = self._rows("SELECT * FROM journal ORDER BY sequence")
         self.assertEqual(
             [row[2:] for row in journal if row[2] == "COUNTER_SIGNAL"],
-            [("COUNTER_SIGNAL", "approval-1", credential_sha256, 5, 5)],
+            [("COUNTER_SIGNAL", "approval-1", credential_sha256, 5, 5, None, None)],
         )
         columns = "at_ms, event, approval_id, credential_sha256, stored_sign_count, presented_sign_count"
         values = f"1, 'COUNTER_SIGNAL', 'approval-1', '{credential_sha256}', 0, 0"
@@ -1120,6 +1221,7 @@ class TestSqliteFailures(_StoreTestCase):
 class TestContention(_StoreTestCase):
     PROCESSES = 4
     THREADS = 8
+    ROUNDS = 5
 
     def _spawn(self, mode, approval_id, response):
         response_path = self.sandbox / f"response-{approval_id}.json"
@@ -1228,6 +1330,98 @@ class TestContention(_StoreTestCase):
         with self.assertRaisesRegex(ApprovalRefusedError, "not pending"):
             store.approve("approval-1", response)
 
+    def assertClosedByTheRevocation(self, outcomes, db_path=None):
+        """Whatever the order, the request ends REVOKED and no approval survives it."""
+
+        approved = outcomes.count("APPROVED")
+        self.assertLessEqual(approved, 1, outcomes)
+        for outcome in outcomes:
+            self.assertTrue(outcome in ("APPROVED", "BUSY") or "not pending" in outcome, outcome)
+        self.assertEqual(
+            self._rows(
+                "SELECT state, approved_at_ms IS NOT NULL FROM approval_requests WHERE approval_id = 'approval-1'",
+                db_path=db_path,
+            ),
+            [("REVOKED", approved)],
+        )
+        events = self._rows("SELECT event, approval_id FROM journal ORDER BY sequence", db_path=db_path)
+        self.assertEqual(events.count(("REQUEST_REVOKED", "approval-1")), 1)
+        self.assertEqual(events.count(("REQUEST_APPROVED", "approval-1")), approved)
+        if approved:
+            self.assertLess(
+                events.index(("REQUEST_APPROVED", "approval-1")), events.index(("REGISTRY_ENTRY_REVOKED", None))
+            )
+
+    def test_a_revocation_racing_approvals_in_threads_always_closes_the_request(self):
+        for round_number in range(self.ROUNDS):
+            with self.subTest(round=round_number):
+                store, db_path = self._fresh_store(f"race-{round_number}")
+                statement = _statement(1)
+                store.create_request(statement)
+                response = _response(statement, self.credential, sign_count=1)
+                barrier = threading.Barrier(self.THREADS + 1)
+                outcomes, revoked, guard = [], [], threading.Lock()
+
+                def approver():
+                    store = ApprovalStore(db_path, self.clock, busy_timeout_seconds=10.0)
+                    barrier.wait(timeout=60)
+                    try:
+                        store.approve("approval-1", response)
+                        outcome = "APPROVED"
+                    except ApprovalStoreError as error:
+                        outcome = f"{type(error).__name__}: {error}"
+                    with guard:
+                        outcomes.append(outcome)
+
+                def revoker():
+                    store = ApprovalStore(db_path, self.clock, busy_timeout_seconds=10.0)
+                    barrier.wait(timeout=60)
+                    revoked.append(store.revoke_approver(APPROVER_ID))
+
+                threads = [threading.Thread(target=approver) for _ in range(self.THREADS)]
+                threads.insert(round_number % len(threads), threading.Thread(target=revoker))
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=120)
+                self.assertEqual(revoked, [True])
+                self.assertEqual(len(outcomes), self.THREADS)
+                self.assertClosedByTheRevocation(outcomes, db_path=db_path)
+
+    def test_a_revocation_racing_approvals_in_other_processes_always_closes_the_request(self):
+        statement = self._pending(1, self.credential)
+        response = _response(statement, self.credential, sign_count=1)
+        revoking = ApprovalStore(self.db_path, self.clock, busy_timeout_seconds=10.0)
+        workers = [self._spawn("contend", "approval-1", response) for _ in range(self.PROCESSES)]
+        try:
+            _wait_for(lambda: len(list(self.sandbox.glob("ready-*"))) == self.PROCESSES, "ready workers")
+            (self.sandbox / "go").write_text("1", encoding="utf-8")
+            self.assertTrue(revoking.revoke_approver(APPROVER_ID))
+            outputs = [worker.communicate(timeout=120) for worker in workers]
+        finally:
+            for worker in workers:
+                if worker.poll() is None:
+                    worker.kill()
+                    worker.communicate(timeout=60)
+        outcomes = []
+        for stdout, stderr in outputs:
+            self.assertTrue(stdout.strip(), stderr[-800:])
+            outcomes.append(json.loads(stdout.strip().splitlines()[-1])["outcome"])
+        self.assertClosedByTheRevocation(outcomes)
+
+    def test_a_revocation_stopped_before_commit_changes_nothing(self):
+        statement = self._pending(1, self.credential)
+        self.store.approve("approval-1", _response(statement, self.credential, sign_count=1))
+        before = self._snapshot()
+
+        self._stop("stop_revocation_before_commit", "approval-1", {})
+
+        store = ApprovalStore(self.db_path, self.clock)
+        self.assertEqual(self._integrity(), [("ok",)])
+        self.assertEqual(self._snapshot(), before)
+        self.assertTrue(store.revoke_approver(APPROVER_ID))
+        self.assertEqual(self._state("approval-1"), "REVOKED")
+
 
 # ----------------------------------------------------------------------
 # Administrator-attested account separation (schema version 2)
@@ -1235,11 +1429,6 @@ class TestContention(_StoreTestCase):
 
 
 class TestAccountSeparation(_StoreTestCase):
-    TABLES = ("store_meta", "principals", "approvers", "github_accounts", "credentials", "approval_requests", "journal")
-
-    def _snapshot(self, db_path=None):
-        return {table: self._rows(f"SELECT * FROM {table} ORDER BY 1", db_path=db_path) for table in self.TABLES}
-
     def assertSeparationRefused(self, call):
         with self.assertRaises(ApprovalRefusedError) as context:
             call()
@@ -1344,12 +1533,13 @@ class TestAccountSeparation(_StoreTestCase):
                     self._rows("SELECT state FROM approval_requests", db_path=db_path), [("PENDING",)]
                 )
 
-    def test_a_revocation_after_approval_does_not_cascade_in_this_increment(self):
+    def test_a_registry_row_revoked_in_the_file_directly_does_not_cascade(self):
         statement = self._pending(1, self.credential)
         self.store.approve("approval-1", _response(statement, self.credential))
         _revoke(self.db_path, "github_accounts", "account_id", ACTOR_ID)
 
-        # Documented limit: a future consumption must re-validate the separation.
+        # Only the store's revocation methods cascade (TestRegistryRevocation);
+        # a future consumption must still re-validate the separation.
         self.assertEqual(self._state("approval-1"), "APPROVED")
         self.assertSeparationRefused(lambda: self.store.create_request(_statement(2)))
 
@@ -1475,6 +1665,316 @@ class TestAccountSeparation(_StoreTestCase):
 
 
 # ----------------------------------------------------------------------
+# Registry revocations and their cascades (schema version 3)
+# ----------------------------------------------------------------------
+
+
+class TestRegistryRevocation(_StoreTestCase):
+    """Revocations of GitHub accounts, approvers and principals.
+
+    `_world()` builds a new database with these requests:
+
+        approval-1  account 12 -> approver 1   PENDING
+        approval-2  account 12 -> approver 1   APPROVED
+        approval-3  account 14 -> approver 1   PENDING
+        approval-4  account 12 -> approver 2   PENDING
+        approval-5  account 15 -> approver 1   PENDING
+        approval-6  account 12 -> approver 1   EXPIRED, already closed
+
+    Accounts 12 and 14 belong to the dispatcher principal, 15 and 16 to the
+    other principal; approver 1 to the approver principal and approver 2 to
+    the other principal. Account 16 has no request.
+    """
+
+    REVOKE = {"ACCOUNT": "revoke_account", "APPROVER": "revoke_approver", "PRINCIPAL": "revoke_principal"}
+    ROWS = {
+        "ACCOUNT": ("github_accounts", "account_id"),
+        "APPROVER": ("approvers", "approver_id"),
+        "PRINCIPAL": ("principals", "principal_id"),
+    }
+    # (kind, ID) -> the requests its revocation must close, and only those.
+    CASCADES = {
+        ("ACCOUNT", ACTOR_ID): (1, 2, 4),
+        ("ACCOUNT", "14"): (3,),
+        ("ACCOUNT", "16"): (),
+        ("APPROVER", APPROVER_ID): (1, 2, 3, 5),
+        ("APPROVER", OTHER_APPROVER_ID): (4,),
+        ("PRINCIPAL", ACTOR_PRINCIPAL): (1, 2, 3, 4),
+        ("PRINCIPAL", APPROVER_PRINCIPAL): (1, 2, 3, 5),
+        ("PRINCIPAL", OTHER_PRINCIPAL): (4, 5),
+    }
+    ONE_OF_EACH = (("ACCOUNT", ACTOR_ID), ("APPROVER", APPROVER_ID), ("PRINCIPAL", APPROVER_PRINCIPAL))
+    REVOKED_AT = NOW + 1_000
+
+    def _world(self, name):
+        db_path = self.sandbox / f"{name}.sqlite3"
+        clock = _Clock(REQUESTED_AT - 500_000)
+        store = ApprovalStore.initialize(db_path, clock, busy_timeout_seconds=FAST_BUSY_TIMEOUT)
+        _seed_default_registry(db_path)
+        _seed_registry(db_path, accounts=(("14", ACTOR_PRINCIPAL), ("15", OTHER_PRINCIPAL), ("16", OTHER_PRINCIPAL)))
+        _seed_credential(db_path, self.credential)
+        early = REQUESTED_AT - 600_000
+        store.create_request(
+            _statement(
+                6,
+                requested_at=early,
+                approval_deadline=early + 600_000,
+                issued_at=early + 1_000,
+                expires_at=early + 301_000,
+            )
+        )
+        clock.now = NOW
+        self.assertTrue(store.expire_request("approval-6"))
+        for n, overrides in (
+            (1, {}),
+            (2, {}),
+            (3, {"run_actor_id": "14"}),
+            (4, {"approver_id": OTHER_APPROVER_ID}),
+            (5, {"run_actor_id": "15"}),
+        ):
+            store.create_request(_statement(n, **overrides))
+        store.approve("approval-2", _response(_statement(2), self.credential, sign_count=1))
+        clock.now = self.REVOKED_AT
+        return store, db_path
+
+    def _requests(self, db_path=None):
+        return {
+            approval_id: tuple(rest)
+            for approval_id, *rest in self._rows(
+                "SELECT approval_id, state, approved_at_ms, approved_credential_id, closed_at_ms"
+                " FROM approval_requests",
+                db_path=db_path,
+            )
+        }
+
+    def _registry_journal(self, db_path=None):
+        return self._rows(
+            "SELECT event, approval_id, registry_kind, registry_sha256, at_ms FROM journal"
+            " WHERE registry_kind IS NOT NULL ORDER BY sequence",
+            db_path=db_path,
+        )
+
+    def test_each_revocation_closes_exactly_the_open_requests_naming_it_in_one_transaction(self):
+        for (kind, key), closed in self.CASCADES.items():
+            with self.subTest(kind=kind, key=key):
+                store, db_path = self._world(f"{kind}-{key}")
+                before = self._snapshot(db_path)
+                requests = self._requests(db_path)
+
+                self.assertIs(getattr(store, self.REVOKE[kind])(key), True)
+
+                expected = dict(requests)
+                for n in closed:
+                    state, approved_at, credential_id, _ = requests[f"approval-{n}"]
+                    self.assertIn(state, ("PENDING", "APPROVED"))
+                    expected[f"approval-{n}"] = ("REVOKED", approved_at, credential_id, self.REVOKED_AT)
+                self.assertEqual(self._requests(db_path), expected)
+
+                after = self._snapshot(db_path)
+                table, _ = self.ROWS[kind]
+                for registry_table in ("principals", "approvers", "github_accounts"):
+                    self.assertEqual(
+                        after[registry_table],
+                        [
+                            (*row[:-2], "REVOKED", self.REVOKED_AT)
+                            if registry_table == table and row[0] == key
+                            else row
+                            for row in before[registry_table]
+                        ],
+                    )
+                self.assertEqual(after["credentials"], before["credentials"])
+                self.assertEqual(after["store_meta"], [(1, self.REVOKED_AT)])
+
+                digest = hashlib.sha256(key.encode()).hexdigest()
+                self.assertEqual(after["journal"][: len(before["journal"])], before["journal"])
+                self.assertEqual(
+                    self._registry_journal(db_path),
+                    [("REGISTRY_ENTRY_REVOKED", None, kind, digest, self.REVOKED_AT)]
+                    + [("REQUEST_REVOKED", f"approval-{n}", kind, digest, self.REVOKED_AT) for n in closed],
+                )
+                self.assertEqual(len(after["journal"]), len(before["journal"]) + 1 + len(closed))
+
+    def test_closed_requests_stay_closed_and_revoked_rows_refuse_new_requests(self):
+        cases = (*self.ONE_OF_EACH, ("PRINCIPAL", ACTOR_PRINCIPAL))
+        for kind, key in cases:
+            with self.subTest(kind=kind, key=key):
+                store, db_path = self._fresh_store(f"closed-{kind}-{key}")
+                statement = _statement(1)
+                store.create_request(statement)
+
+                self.assertTrue(getattr(store, self.REVOKE[kind])(key))
+
+                with self.assertRaisesRegex(ApprovalRefusedError, "not pending"):
+                    store.approve("approval-1", _response(statement, self.credential, sign_count=1))
+                self.assertFalse(store.expire_request("approval-1"))
+                with self.assertRaisesRegex(ApprovalRefusedError, SEPARATION_REFUSED):
+                    store.create_request(_statement(2))
+                self.assertEqual(self._rows("SELECT state FROM approval_requests", db_path=db_path), [("REVOKED",)])
+
+    def test_a_repeated_revocation_returns_false_without_any_write(self):
+        statement = self._pending(1, self.credential)
+        self.store.approve("approval-1", _response(statement, self.credential, sign_count=1))
+        self._pending(2)
+        revocations = {
+            "credential": (self.store.revoke_credential, self.credential.credential_id),
+            "account": (self.store.revoke_account, ACTOR_ID),
+            "approver": (self.store.revoke_approver, APPROVER_ID),
+            "principal": (self.store.revoke_principal, ACTOR_PRINCIPAL),
+        }
+        # data_version changes whenever another connection commits a change.
+        watcher = sqlite3.connect(self.db_path)
+        self.addCleanup(watcher.close)
+
+        def data_version():
+            return watcher.execute("PRAGMA data_version").fetchone()[0]
+
+        for name, (revoke, key) in revocations.items():
+            with self.subTest(first=name):
+                version = data_version()
+                self.assertIs(revoke(key), True)
+                self.assertNotEqual(data_version(), version)
+        # A later clock would show any write, even of the observed instant alone.
+        self.clock.now = NOW + 60_000
+        before, version = self._snapshot(), data_version()
+        for name, (revoke, key) in revocations.items():
+            with self.subTest(again=name):
+                self.assertIs(revoke(key), False)
+                self.assertEqual(self._snapshot(), before)
+                self.assertEqual(data_version(), version)
+
+    def test_unknown_or_malformed_ids_are_refused_without_any_write_or_echo(self):
+        self._pending(1)
+        before = self._snapshot()
+        registry_ids = (
+            None, 5, "", " entry-x", "entry-x ", "-entry-x", "entry x", "entry/x", "entry\x00x", "x" * 129, "entr\u00e9e",
+        )
+        account_ids = (None, 12, True, "", "012", "-12", "+12", " 12", "12 ", "12\n", "1.5", "octocat", "\uff11\uff12")
+        cases = {
+            "ACCOUNT": ("99", account_ids),
+            "APPROVER": ("approver-unknown", registry_ids),
+            "PRINCIPAL": ("principal-unknown", registry_ids),
+        }
+        for kind, (unknown, malformed) in cases.items():
+            revoke = getattr(self.store, self.REVOKE[kind])
+            for value in (unknown, *malformed):
+                with self.subTest(kind=kind, value=value):
+                    with self.assertRaises(ApprovalRefusedError) as context:
+                        revoke(value)
+                    message = str(context.exception)
+                    self.assertIn("is not registered" if value == unknown else "ID is missing or malformed", message)
+                    if isinstance(value, str) and value:
+                        self.assertNotIn(value, message)
+                    self.assertIsNone(context.exception.__cause__)
+                    self.assertEqual(self._snapshot(), before)
+
+    def test_a_journal_failure_rolls_the_whole_revocation_back(self):
+        original = store_module._append_journal
+        for kind, key in self.ONE_OF_EACH:
+            store, db_path = self._fresh_store(f"journal-{kind}")
+            approved = _statement(1)
+            store.create_request(approved)
+            store.approve("approval-1", _response(approved, self.credential, sign_count=1))
+            store.create_request(_statement(2))
+            before = self._snapshot(db_path)
+            for failing_event in ("REGISTRY_ENTRY_REVOKED", "REQUEST_REVOKED"):
+                with self.subTest(kind=kind, failing=failing_event):
+
+                    def failing_journal(connection, at_ms, event, **kwargs):
+                        if event == failing_event:
+                            raise sqlite3.OperationalError(f"synthetic disk I/O error on {key}")
+                        original(connection, at_ms, event, **kwargs)
+
+                    with mock.patch.object(store_module, "_append_journal", failing_journal):
+                        with self.assertRaises(ApprovalStoreUnavailableError) as context:
+                            getattr(store, self.REVOKE[kind])(key)
+                    self.assertNotIn(key, str(context.exception))
+                    self.assertEqual(self._snapshot(db_path), before)
+            self.assertTrue(getattr(store, self.REVOKE[kind])(key))
+            self.assertEqual(
+                self._rows("SELECT state FROM approval_requests ORDER BY approval_id", db_path=db_path),
+                [("REVOKED",), ("REVOKED",)],
+            )
+
+    def test_a_clock_moving_backwards_does_not_block_a_registry_revocation(self):
+        for kind, key in self.ONE_OF_EACH:
+            with self.subTest(kind=kind):
+                self.clock.now = NOW
+                store, db_path = self._fresh_store(f"clock-{kind}")
+                statement = _statement(1)
+                store.create_request(statement)
+                self.clock.now = NOW + 5_000
+                store.approve("approval-1", _response(statement, self.credential, sign_count=1))
+                self.clock.now = NOW
+
+                self.assertTrue(getattr(store, self.REVOKE[kind])(key))
+
+                table, column = self.ROWS[kind]
+                self.assertEqual(
+                    self._rows(f"SELECT revoked_at_ms FROM {table} WHERE {column} = ?", (key,), db_path=db_path),
+                    [(NOW + 5_000,)],
+                )
+                self.assertEqual(
+                    self._rows("SELECT state, closed_at_ms FROM approval_requests", db_path=db_path),
+                    [("REVOKED", NOW + 5_000)],
+                )
+                self.assertEqual(
+                    self._rows("SELECT last_observed_ms FROM store_meta", db_path=db_path), [(NOW + 5_000,)]
+                )
+                self.assertEqual({row[4] for row in self._registry_journal(db_path)}, {NOW + 5_000})
+
+    def test_an_unusable_clock_refuses_a_registry_revocation_without_any_write(self):
+        self._pending(1)
+        before = self._snapshot()
+
+        def failing():
+            raise OSError("synthetic clock failure")
+
+        for clock in (failing, lambda: 0, lambda: -1, lambda: float(NOW), lambda: str(NOW)):
+            self.store._clock = clock
+            for kind, key in self.ONE_OF_EACH:
+                with self.subTest(clock=clock, kind=kind):
+                    with self.assertRaisesRegex(ApprovalRefusedError, "clock"):
+                        getattr(self.store, self.REVOKE[kind])(key)
+                    self.assertEqual(self._snapshot(), before)
+
+    def test_a_busy_store_refuses_a_registry_revocation_after_the_bounded_timeout_without_change(self):
+        self._pending(1)
+        before = self._snapshot()
+        blocker = sqlite3.connect(self.db_path, autocommit=True)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            for kind, key in self.ONE_OF_EACH:
+                with self.subTest(kind=kind), self.assertRaisesRegex(ApprovalStoreBusyError, "locked"):
+                    getattr(self.store, self.REVOKE[kind])(key)
+            blocker.execute("ROLLBACK")
+        finally:
+            blocker.close()
+        self.assertEqual(self._snapshot(), before)
+        self.assertTrue(self.store.revoke_account(ACTOR_ID))
+        self.assertEqual(self._state("approval-1"), "REVOKED")
+
+    def test_a_principal_revocation_leaves_its_rows_to_the_separation_check(self):
+        self._pending(1, self.credential)
+
+        self.assertTrue(self.store.revoke_principal(APPROVER_PRINCIPAL))
+
+        self.assertEqual(self._rows("SELECT state FROM approvers WHERE approver_id = ?", (APPROVER_ID,)), [("ACTIVE",)])
+        self.assertEqual(self._credential_row(self.credential)[2], "ACTIVE")
+        with self.assertRaisesRegex(ApprovalRefusedError, SEPARATION_REFUSED):
+            self.store.create_request(_statement(2))
+        # Each row can still be revoked on its own; no open request is left.
+        self.assertTrue(self.store.revoke_approver(APPROVER_ID))
+        self.assertEqual(
+            [(event, approval_id, kind) for event, approval_id, kind, _, _ in self._registry_journal()],
+            [
+                ("REGISTRY_ENTRY_REVOKED", None, "PRINCIPAL"),
+                ("REQUEST_REVOKED", "approval-1", "PRINCIPAL"),
+                ("REGISTRY_ENTRY_REVOKED", None, "APPROVER"),
+            ],
+        )
+
+
+# ----------------------------------------------------------------------
 # Scope boundaries
 # ----------------------------------------------------------------------
 
@@ -1485,22 +1985,53 @@ class TestScopeBoundaries(_StoreTestCase):
     def test_the_store_exposes_only_the_operations_of_this_step(self):
         public = {name for name in dir(ApprovalStore) if not name.startswith("_")}
         self.assertEqual(
-            public, {"initialize", "create_request", "approve", "expire_request", "revoke_credential"}
+            public,
+            {
+                "initialize",
+                "create_request",
+                "approve",
+                "expire_request",
+                "revoke_credential",
+                "revoke_account",
+                "revoke_approver",
+                "revoke_principal",
+            },
         )
 
     def test_the_store_module_has_no_enrollment_or_registry_administration_path(self):
         registry_tables = r"(credentials|principals|approvers|github_accounts)\b"
-        self.assertIsNone(re.search(r"(?i)insert\s+(or\s+\w+\s+)?into\s+" + registry_tables, self.SOURCE))
-        administration = r"(?i)(update|delete\s+from)\s+(principals|approvers|github_accounts)\b"
-        self.assertIsNone(re.search(administration, self.SOURCE))
-        names = {
-            node.name
-            for node in ast.walk(ast.parse(self.SOURCE))
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
-        }
-        administration_names = r"(?i)enrol|register|add_|insert|attest|revoke_(account|approver|principal)"
+        self.assertIsNone(re.search(r"(?i)(insert|replace)\s+(or\s+\w+\s+)?into\s+" + registry_tables, self.SOURCE))
+        self.assertIsNone(re.search(r"(?i)delete\s+from\s+" + registry_tables, self.SOURCE))
+        # The only registry writes are the three revocations, spelled out in full.
+        registry_update = r"(?i)\bupdate\s+(or\s+\w+\s+)?(principals|approvers|github_accounts)\b"
+        tree = ast.parse(self.SOURCE)
+        constants = [
+            node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+        self.assertEqual(
+            sorted(value for value in constants if re.search(registry_update, value)),
+            sorted(
+                f"UPDATE {table} SET state = 'REVOKED', revoked_at_ms = :now WHERE {column} = :key AND state = 'ACTIVE'"
+                for table, column in TestRegistryRevocation.ROWS.values()
+            ),
+        )
+        self.assertEqual(len(re.findall(registry_update, self.SOURCE)), 3)
+        # No written table is named at run time.
+        self.assertIsNone(re.search(r"(?i)\b(update(\s+or\s+\w+)?|into|delete\s+from)\s+\{", self.SOURCE))
+        names = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+        administration_names = r"(?i)enrol|register|add_|insert|attest|activat|grant"
         for name in names:
             self.assertIsNone(re.search(administration_names, name), name)
+
+    def test_the_revocations_are_documented_as_no_administration_boundary(self):
+        doc = " ".join((store_module.__doc__ or "").split())
+        self.assertIn("not an administration boundary", doc)
+        self.assertIn("the store cannot tell who calls them and records no author", doc)
+        for name in ("revoke_credential", "revoke_account", "revoke_approver", "revoke_principal"):
+            with self.subTest(method=name):
+                method_doc = " ".join((getattr(ApprovalStore, name).__doc__ or "").split())
+                self.assertIn("Not an administration boundary: the caller is not authenticated.", method_doc)
+        self.assertNotIn("author", [row[1] for row in self._rows("PRAGMA table_info(journal)")])
 
     def test_the_signed_account_id_is_persisted_and_checked_without_any_login_while_d5_stays_unresolved(self):
         tables = [name for (name,) in self._rows("SELECT name FROM sqlite_schema WHERE type = 'table'")]
@@ -1532,8 +2063,13 @@ class TestScopeBoundaries(_StoreTestCase):
         with self.assertRaises(ApprovalRefusedError):
             self.store.approve("approval-2", _response(second, self.credential, sign_count=3))
         self.store.revoke_credential(self.credential.credential_id)
+        self.store.revoke_approver(APPROVER_ID)
+        self.store.revoke_account(ACTOR_ID)
+        self.store.revoke_principal(ACTOR_PRINCIPAL)
+        self.store.revoke_principal(APPROVER_PRINCIPAL)
 
-        stored = json.dumps(self._rows("SELECT * FROM journal"))
+        rows = self._rows("SELECT * FROM journal")
+        stored = json.dumps(rows)
         for secret_like in (
             self.credential.credential_id.hex(),
             response["rawId"],
@@ -1542,14 +2078,32 @@ class TestScopeBoundaries(_StoreTestCase):
             response["response"]["authenticatorData"],
             ACTOR_PRINCIPAL,
             APPROVER_PRINCIPAL,
+            APPROVER_ID,
         ):
             self.assertNotIn(secret_like, stored)
-        # No journal column can hold an account or principal ID.
+        self.assertNotIn(ACTOR_ID, [cell for row in rows for cell in row])
+        # Registry entries appear only as digests. A digest of a numeric account
+        # ID can be found again by enumeration: it is not a secret.
         self.assertEqual(
             [row[1] for row in self._rows("PRAGMA table_info(journal)")],
             [
-                "sequence", "at_ms", "event", "approval_id",
-                "credential_sha256", "stored_sign_count", "presented_sign_count",
+                "sequence", "at_ms", "event", "approval_id", "credential_sha256",
+                "stored_sign_count", "presented_sign_count", "registry_kind", "registry_sha256",
+            ],
+        )
+        self.assertEqual(
+            self._rows(
+                "SELECT registry_kind, registry_sha256 FROM journal"
+                " WHERE event = 'REGISTRY_ENTRY_REVOKED' ORDER BY sequence"
+            ),
+            [
+                (kind, hashlib.sha256(key.encode()).hexdigest())
+                for kind, key in (
+                    ("APPROVER", APPROVER_ID),
+                    ("ACCOUNT", ACTOR_ID),
+                    ("PRINCIPAL", ACTOR_PRINCIPAL),
+                    ("PRINCIPAL", APPROVER_PRINCIPAL),
+                )
             ],
         )
 
