@@ -1046,3 +1046,76 @@ Le job Ubuntu `posix-approval-store` exécutera ce module sous Linux ; il n’a 
 Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
 
 Aucune migration, aucun point d’accès d’administration, aucun jeton OIDC réel, credential réel, secret, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+### G2 — registre durable v3 : révocations du registre en cascade (19 octobre 2026)
+
+**D-5 reste non résolu.** Cette étape ajoute seulement des révocations. Elle n’ajoute ni inscription, ni administration authentifiée, ni consommation, ni mode dégradé. Un état `APPROVED` n’autorise toujours rien.
+
+**Vérification préalable du schéma v2.** Avant toute modification, une base temporaire a été créée avec le module v2. La transition `PENDING → REVOKED` y était refusée deux fois : par le déclencheur `approval_requests_transitions`, qui n’admettait que `APPROVED → REVOKED`, puis, ce déclencheur retiré, par la contrainte `CHECK`, qui exigeait `approved_at_ms` pour l’état `REVOKED`. Le passage `ACTIVE → REVOKED` des comptes, approbateurs et principaux était déjà permis. Les colonnes qui portent les cascades (`run_actor_id`, `approver_id`, `actor_principal_id`, `approver_principal_id`) existaient et étaient couvertes par le déclencheur d’immuabilité de l’énoncé.
+
+- **Schéma version 3.** `SCHEMA_VERSION` vaut 3. Aucune migration n’existe : une base v1, v2 ou d’une autre version est refusée à l’ouverture.
+  - `REVOKED` n’exige plus que `closed_at_ms`. Le déclencheur admet `PENDING → REVOKED` et `APPROVED → REVOKED`, à condition que `approved_at_ms` et `approved_credential_id` restent inchangés : une demande `PENDING` révoquée ne porte aucune approbation, une demande `APPROVED` garde la sienne. `REVOKED` reste terminal.
+  - Le journal reçoit deux colonnes, `registry_kind` (`ACCOUNT`, `APPROVER` ou `PRINCIPAL`) et `registry_sha256` (SHA-256 de l’identifiant, en hexadécimal minuscule), et deux événements, `REGISTRY_ENTRY_REVOKED` et `REQUEST_REVOKED`. Des contraintes réservent ces colonnes à ces deux événements, exigent `approval_id` pour le second seulement et y interdisent toute empreinte de credential.
+- **Méthodes.** `revoke_account`, `revoke_approver` et `revoke_principal` s’ajoutent à `revoke_credential`. Chacune vérifie le format de l’identifiant puis, dans une seule transaction `BEGIN IMMEDIATE` :
+  - vérifie que la ligne existe ;
+  - la passe à `REVOKED` ;
+  - passe à `REVOKED` toutes les demandes `PENDING` ou `APPROVED` qui la désignent, y compris une demande `PENDING` échue mais pas encore marquée `EXPIRED` ;
+  - journalise la ligne, puis chaque demande fermée, par empreinte.
+- **Demandes concernées.** Pour un compte, celles dont `run_actor_id` est ce compte. Pour un approbateur, celles qui le désignent. Pour un principal, celles dont l’acteur ou l’approbateur lui est rattaché. Les demandes `EXPIRED` ou `REVOKED` ne changent pas.
+- **Pas de cascade vers les lignes rattachées.** Révoquer un principal laisse ses comptes, approbateurs et credentials dans leur état ; révoquer un approbateur laisse ses credentials. Le contrôle de séparation les refuse déjà à travers la ligne révoquée, et chacune peut être révoquée séparément.
+- **Définitive, sans écriture répétée.** Une ligne déjà révoquée renvoie `False` avant toute écriture, horloge observée comprise. `revoke_credential` suit désormais la même règle : il enregistrait auparavant l’instant observé avant de constater qu’un credential était déjà révoqué. Les déclencheurs existants interdisent toujours toute réactivation.
+- **Échecs.** Toute erreur, y compris du journal, annule la transaction entière. Un recul d’horloge ne bloque pas une révocation, qui enregistre alors le dernier instant observé ; une horloge inutilisable la refuse. Au-delà du délai d’attente, `ApprovalStoreBusyError` est levée sans modification.
+- **Messages et journal.** Les messages nomment le type de ligne, jamais son identifiant. Le journal ne contient que des empreintes. L’empreinte d’un identifiant numérique GitHub ou d’un pseudonyme court se retrouve par énumération : elle garde les identifiants bruts hors du journal sans les rendre secrets.
+- **Concurrence.** Révocation et approbation prennent le verrou d’écriture par `BEGIN IMMEDIATE`. Si l’approbation est validée d’abord, la révocation la fait passer à `REVOKED` ; sinon, l’approbation trouve une demande qui n’est plus `PENDING`.
+
+**Pas une frontière d’administration.** Ces méthodes sont des primitives transactionnelles. Le registre ne sait pas qui les appelle et n’enregistre aucun auteur : tout processus qui peut les appeler, ou écrire dans le fichier, peut révoquer. Elles ne doivent pas être exposées comme interface d’administration d’un déploiement. Aucune CLI, aucun serveur, aucune interface d’administration ni aucune voie d’inscription n’est ajouté. R1, R2, P-1, les invitations et une preuve WebAuthn d’administration restent à concevoir séparément.
+
+**Ce que prouvent les tests.** `tests/test_g2_approval_store.py` passe de 59 à 74 tests :
+
+- **cascades exactes :** huit révocations, dans une base qui contient des demandes `PENDING`, `APPROVED` et `EXPIRED`. Chacune ferme exactement les demandes attendues et garde l’approbation d’une demande `APPROVED`. Elle ne touche ni les autres demandes, ni les autres lignes du registre, ni les credentials, et ajoute exactement les entrées de journal attendues. Un compte sans demande ne produit que l’entrée de sa ligne ;
+- **après révocation :** approbation refusée (« non `PENDING` »), expiration sans effet, nouvelle demande refusée par la séparation ;
+- **révocation répétée** des quatre types : `False`, base identique, horloge observée comprise, et `PRAGMA data_version` inchangé pour une connexion témoin, alors qu’il change à chaque première révocation ;
+- **identifiants :** pour chaque type, un identifiant inconnu, et treize formes mal formées pour un compte, onze pour un approbateur ou un principal. Tous sont refusés sans écriture ni écho de la valeur ;
+- **journal en échec** sur l’entrée de la ligne ou sur celle d’une demande : base identique, puis révocation possible ;
+- **horloge et verrou :** recul d’horloge, cinq horloges inutilisables, verrou tenu au-delà du délai ;
+- **principal révoqué :** lignes rattachées intactes mais refusées par la séparation, puis révocables séparément ;
+- **courses :** révocation contre huit threads d’approbation (cinq tours) et contre quatre processus. La demande finit toujours `REVOKED`, au plus une approbation est validée et, dans ce cas, elle précède la révocation dans le journal ;
+- **arrêt brutal :** processus tué avant le `COMMIT` d’une révocation : base identique, `integrity_check` sain, révocation possible ensuite ;
+- **schéma :** depuis `PENDING`, seule la fermeture sans approbation est admise. Une approbation forgée, effacée ou modifiée, `EXPIRED → REVOKED` et toute sortie de `REVOKED` sont refusées, de même que onze formes incorrectes d’entrées de journal ;
+- **périmètre :** les seules écritures du registre sont les trois révocations, écrites en entier, sans nom de table construit à l’exécution. Aucune méthode d’inscription, d’attestation ou d’activation n’existe. L’avertissement figure dans la documentation du module et de chaque méthode de révocation, et le journal n’a aucune colonne d’auteur.
+
+Les tests existants sont ajustés : version 3, refus des versions 2 et 4, colonnes du journal, liste des opérations publiques et garde d’administration. Le test qui révoque une ligne par SQL direct est conservé sous un nouveau nom : une telle révocation contourne la cascade.
+
+Dix-neuf mutations ont été appliquées une à une à une copie du module, hors du dépôt. Dix-huit font échouer les tests :
+
+- cascade sans les demandes `PENDING`, sans les demandes `APPROVED`, limitée au côté acteur pour un principal, ou étendue au principal d’un compte ;
+- demandes fermées non journalisées ; erreur du journal ignorée ;
+- horloge enregistrée avant le constat d’une révocation répétée, pour le registre comme pour un credential ; écriture réelle mais neutre pour le contenu lors d’une révocation répétée ;
+- recul d’horloge bloquant ;
+- déclencheur v2 conservé ; déclencheur qui laisse réécrire l’approbation ; `REVOKED` sans instant de fermeture ;
+- colonnes du registre permises sur tout événement ; empreinte sans contrôle hexadécimal ;
+- identifiant repris dans un message ; format d’identifiant non vérifié ;
+- avertissement retiré de la documentation du module.
+
+La dix-neuvième réécrivait une ligne avec un contenu identique. SQLite n’écrit alors aucune page : cette mutation est équivalente au code d’origine et ne pouvait pas être détectée. Le dépôt n’a pas été modifié par ces essais.
+
+**Vérifications.** Elles ont été exécutées avec CPython 3.14.5 sous Windows. Les dépendances verrouillées provenaient d’une installation antérieure, hors du dépôt : ses versions correspondent au verrou et ses fichiers concordent avec leurs `RECORD`. Rien n’a été téléchargé.
+
+- registre : 74 tests réussis, dont deux ignorés (tests propres à POSIX) ;
+- suite complète (`python -m unittest discover -s tests -t .`) : 3 139 tests réussis, dont deux ignorés (tests propres à POSIX du registre durable) ;
+- audit d’architecture : `NO_DRIFT` ;
+- `git diff --check` : propre.
+
+Le job Ubuntu `posix-approval-store` exécutera ce module sous Linux ; il n’a pas pu être lancé localement.
+
+**Limites restantes.**
+
+- L’appelant n’est ni authentifié ni enregistré, et aucun motif n’est consigné. Aucune révocation ne ferme l’interrupteur D-9, qui n’existe pas encore.
+- Une ligne révoquée par écriture directe dans le fichier ne déclenche aucune cascade. Toute future consommation devra revalider la séparation et l’état des lignes.
+- Les déclencheurs restent des conventions renforcées : un processus qui peut écrire le fichier peut les contourner (§4.9).
+- Le journal n’est ni chaîné ni ancré.
+- La présence de `actor_id` dans un jeton réel reste à confirmer, avec une autorisation explicite et distincte.
+
+Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
+
+Aucune migration, aucune interface d’administration, aucun jeton OIDC réel, credential réel, secret, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
