@@ -112,6 +112,8 @@ Cette liaison cryptographique ne garantit pas, à elle seule, que l’utilisateu
 
 Apple indique que les passkeys peuvent être synchronisées entre appareils via iCloud Keychain. Il faudra vérifier si une passkey synchronisée répond à l’exigence d’un authentificateur séparé ; une passkey synchronisée ne démontre pas que le justificatif est propre à l’iPhone. [W3C — WebAuthn](https://www.w3.org/TR/webauthn-3/) · [Apple — Passkeys](https://developer.apple.com/passkeys/)
 
+**Décision du propriétaire (2026-10-21) — poursuite de l’étude.** Conserver la passkey iCloud synchronisée comme candidate d’étude, en gardant la synchronisation parmi les risques à évaluer. Cette décision ne prouve pas qu’elle satisfait l’exigence d’authentificateur séparé et ne sélectionne pas de solution finale.
+
 Ces limites restent à l’étude : aucun mécanisme ni fournisseur n’est choisi. D-5 reste une condition distincte. Provider = CLOSED ; NO-GO inchangé.
 
 ## 6. Critères de décision
