@@ -100,6 +100,12 @@ Observations factuelles :
 - L'option A et les variantes « dans le processus » de B et C améliorent la traçabilité, mais ne satisfont pas la condition 1.
 - Toutes les options exigent L1 à L8. Aucune ne dispense des conditions 3 (plafond), 4 (`UNKNOWN` bloquant) et 5 (révocation et journal).
 
+**Piste retenue pour étude par le propriétaire (2026-10-21) : passkey sur un authentificateur séparé.** Cette piste doit être évaluée sans sélectionner encore de fournisseur ni d’architecture.
+
+Pour satisfaire les exigences L1 à L8, la confirmation devra être liée à l’énoncé canonique de la requête, protégée contre le rejeu, limitée à 300 secondes au maximum et vérifiée par clé publique. Une connexion générique par passkey, sans liaison à la requête précise, ne suffit pas.
+
+Cette note ne constitue ni une implémentation ni une autorisation d’ouverture. L’identité de l’autorisateur reste non authentifiée jusqu’à la réalisation et la validation de ce mécanisme. Provider = CLOSED ; NO-GO inchangé.
+
 ## 6. Critères de décision
 
 Le choix appartient au **propriétaire du projet**. Ce document ne recommande aucune option de façon contraignante. Critères proposés, par ordre de priorité :
