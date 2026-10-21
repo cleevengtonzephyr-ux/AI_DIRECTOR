@@ -106,6 +106,14 @@ Pour satisfaire les exigences L1 à L8, la confirmation devra être liée à l�
 
 Cette note ne constitue ni une implémentation ni une autorisation d’ouverture. L’identité de l’autorisateur reste non authentifiée jusqu’à la réalisation et la validation de ce mécanisme. Provider = CLOSED ; NO-GO inchangé.
 
+**Limites à vérifier pour l’option passkey sur iPhone.** Une assertion WebAuthn peut être liée à l’empreinte de l’énoncé L1 au moyen d’un challenge. La Gate devra vérifier cette preuve avec la clé publique, ainsi que l’origine, l’identifiant RP, l’expiration et l’usage unique du nonce. La vérification utilisateur devra être exigée.
+
+Cette liaison cryptographique ne garantit pas, à elle seule, que l’utilisateur a vu et confirmé les paramètres vidéo et le coût. L’interface devra présenter clairement l’énoncé canonique sur l’iPhone avant l’approbation, puis lier la preuve à son empreinte. Ce point reste à concevoir et à valider.
+
+Apple indique que les passkeys peuvent être synchronisées entre appareils via iCloud Keychain. Il faudra vérifier si une passkey synchronisée répond à l’exigence d’un authentificateur séparé ; une passkey synchronisée ne démontre pas que le justificatif est propre à l’iPhone. [W3C — WebAuthn](https://www.w3.org/TR/webauthn-3/) · [Apple — Passkeys](https://developer.apple.com/passkeys/)
+
+Ces limites restent à l’étude : aucun mécanisme ni fournisseur n’est choisi. D-5 reste une condition distincte. Provider = CLOSED ; NO-GO inchangé.
+
 ## 6. Critères de décision
 
 Le choix appartient au **propriétaire du projet**. Ce document ne recommande aucune option de façon contraignante. Critères proposés, par ordre de priorité :
