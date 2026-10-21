@@ -3,7 +3,7 @@
 - **Date :** 2026-09-27
 - **Référence :** `main` à `5ae61489f3cbc0e15f315eb781d56c11a17e696e` (CI verte : tests + `NO_DRIFT`)
 - **Statut :** décision en vigueur
-- **Dernière mise à jour :** 2026-09-30 (Phase E1), à `main` `2b10c40bc28b318d3be75f66a029bc2e914f05cc` : description des protections de la Phase D et lien vers le document de conception de la Phase E. Puis Phase E2, à `main` `8ad12f60465eb16edd36c7216ba04caa9c59ec8b` : dernier contrôle du contenu avant toute consommation (condition 2, toujours partiellement traitée). Puis, le 2026-10-19 (branche `phase-g2-provider-egress-guard`, non fusionnée) : fermeture de toute sortie vers Higgsfield, lectures comprises (voir « Aucune sortie vers Higgsfield, même en lecture seule »). La décision elle-même est inchangée.
+- **Dernière mise à jour :** 2026-10-19, après fusion dans `main` de la PR #53 (`ca6a7fcd17ab00deedffd17fd2a86b27c07f69fd`) : fermeture de toute sortie vers Higgsfield, lectures comprises (voir « Aucune sortie vers Higgsfield, même en lecture seule »). Les mises à jour antérieures des phases D et E2 restent décrites dans l’historique Git. La décision elle-même est inchangée.
 
 ## Décision
 
