@@ -129,6 +129,20 @@ Le choix appartient au **propriétaire du projet**. Ce document ne recommande au
 7. **Coût opérationnel et réversibilité.** Faut-il des appareils, des comptes ou des procédures de perte ou de rotation de clé ?
 8. **Indépendance vis-à-vis de Higgsfield.** L'identité de facturation n'est pas une identité d'autorisateur.
 
+### Évaluation provisoire de la passkey iCloud
+
+| Critère | État actuel |
+|---|---|
+| Résistance à l’usurpation | **Partiel, à prouver.** Il faudrait exiger une vérification utilisateur et une confirmation claire sur l’iPhone. La passkey synchronisée ne prouve pas à elle seule l’intention d’approuver la requête. |
+| Liaison aux exigences L1 à L7 | **Possible, non démontrée.** Le challenge devrait être lié à l’empreinte L1 ; la Gate devrait vérifier la preuve par rapport à la requête et à ses paramètres réels. |
+| Échec fermé | **Non implémenté.** L’absence de l’iPhone, une erreur de vérification, l’expiration ou un rejeu devraient toujours bloquer l’approbation. |
+| Disponibilité démontrée | **Partielle.** L’iPhone, Face ID et iCloud Keychain sont disponibles. Le flux de confirmation, le service destinataire et les procédures de récupération ou révocation ne sont pas établis. |
+| Absence de secrets persistés | **À démontrer.** Il faudra vérifier que seuls les éléments publics et nécessaires sont conservés, sans secret dans le dépôt, `state/` ou les journaux. |
+| Tests mock-only | **Possible, non implémenté.** Les contrôles devront être testés sans réseau, sans secret réel et sans génération réelle. |
+| Coût opérationnel et réversibilité | **À évaluer.** La portée de la synchronisation, la perte d’accès, la récupération, la révocation et la rotation restent à définir. |
+| Indépendance vis-à-vis de Higgsfield | **À prouver.** L’approbation doit rester distincte de l’identité de facturation Higgsfield. Le Provider fermé ne prouve pas encore ce mécanisme. |
+**Conclusion provisoire :** la passkey iCloud demeure une candidate d’étude ; aucun des critères n’est entièrement validé. Ce bilan ne choisit pas une solution et n’autorise aucune implémentation ou ouverture. D-5 reste distinct. Provider = CLOSED ; NO-GO inchangé.
+
 ## 7. Ce que cette phase ne fait pas
 
 - Aucune modification de `agents/`, `integrations/`, `director.py` ni `scripts/`.
