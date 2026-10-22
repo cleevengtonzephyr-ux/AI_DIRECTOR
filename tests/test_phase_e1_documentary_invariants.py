@@ -12,7 +12,7 @@ distincte n'existe :
    aucune ;
 3. la décision de Phase A renvoie au document de la Phase E1, qui
    renvoie lui-même à la conception de la Phase C pour la condition 1 ;
-4. aucun montant de plafond n'est inventé ;
+4. seul le plafond explicitement décidé par le propriétaire est admis dans la décision de Phase A ; les documents des Phases C et E1 ne fixent aucun montant ;
 5. la décision de Phase A décrit les protections de la Phase D qui
    existent réellement dans le code.
 
@@ -249,25 +249,43 @@ class DocumentsLinkToEachOther(unittest.TestCase):
 
 
 class NoCeilingAmountIsInvented(unittest.TestCase):
-    def test_no_document_states_a_credit_amount(self):
-        for path in (DECISION_DOC, IDENTITY_DESIGN_DOC, E1_DOC):
+    def test_only_owner_decision_states_a_credit_amount(self):
+        decision = _read(DECISION_DOC)
+        self.assertEqual(CREDIT_AMOUNT.findall(decision), ["0 crédit"])
+        self.assertEqual(CEILING_ASSIGNMENT.findall(decision), [])
+
+        for path in (IDENTITY_DESIGN_DOC, E1_DOC):
             markdown = _read(path)
             with self.subTest(document=path.name):
                 self.assertEqual(CREDIT_AMOUNT.findall(markdown), [])
                 self.assertEqual(CEILING_ASSIGNMENT.findall(markdown), [])
 
-    def test_decision_says_no_amount_is_set(self):
+    def test_decision_records_explicit_zero_ceiling(self):
         decision = _read(DECISION_DOC)
         conditions = _section(decision, "## Conditions préalables")
-        condition_3 = [line for line in conditions.splitlines() if line.startswith("3. **Plafond de crédits par requête.**")]
+        condition_3 = [
+            line for line in conditions.splitlines()
+            if line.startswith("3. **Plafond de crédits par requête.**")
+        ]
         self.assertEqual(len(condition_3), 1)
-        self.assertIn("**Aucun montant n'est fixé par ce document.**", condition_3[0])
-        self.assertEqual(_digits_outside_allowed_references(condition_3[0][len("3. "):]), [])
+        self.assertIn(
+            "Décision du propriétaire (2026-10-22) : le plafond est fixé à 0 crédit par requête.",
+            condition_3[0],
+        )
+        condition_3_without_label_and_date = (
+            condition_3[0]
+            .removeprefix("3. ")
+            .replace("(2026-10-22)", "")
+        )
+        self.assertEqual(
+            _digits_outside_allowed_references(condition_3_without_label_and_date),
+            ["0"],
+        )
 
         cells = _cells(_table_row(decision, GAPS_HEADING, "| 3. Plafond de crédits |"))
-        self.assertIn("Aucun montant n'est fixé", cells[2])
+        self.assertIn("décision du propriétaire", cells[2])
+        self.assertIn("application reste à démontrer", cells[2])
         self.assertEqual(_digits_outside_allowed_references(cells[2]), [])
-
     def test_e1_ceiling_section_contains_no_number_at_all(self):
         ceiling = _section(_read(E1_DOC), "## 4. Condition 3 — plafond de crédits")
         self.assertIn("**Aucun montant n'est fixé par ce document.**", ceiling)
