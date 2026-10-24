@@ -824,24 +824,26 @@ Le job Ubuntu n’a pas pu être exécuté localement, faute de WSL et de Docker
 
 Aucun secret, authentificateur réel, jeton, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
 
-### G2 — extraction facultative de `actor_id` OIDC (18 octobre 2026)
+### G2 — extraction de `actor_id` OIDC : contrat initial facultatif (18 octobre 2026, remplacé le 24 octobre)
 
 **D-5 reste non résolu.** Cette étape ajoute seulement un identifiant de compte à l’identité du run vérifiée. Elle ne relie ce compte à aucun approbateur ni à aucun credential WebAuthn, et ne prouve pas que deux personnes distinctes interviennent.
+
+**Repère historique :** les règles d’optionalité ci-dessous décrivent le contrat initial du 18 octobre 2026. Elles ont été remplacées par la décision du propriétaire du 24 octobre, consignée plus bas dans la section « G2 — registre durable v3 : révocations du registre en cascade (19 octobre 2026) », après les décisions du propriétaire des 19 et 23 octobre.
 
 - **Champ ajouté.** `VerifiedRunIdentity` porte désormais `actor_id`. Trois éléments sont à distinguer :
   - **Ce qu’affirme la documentation de GitHub :** `actor_id` est l’identifiant du compte personnel qui a initié le run.
   - **Ce que montre l’exemple officiel :** une valeur sous forme de chaîne, par exemple `"12"`. Un exemple n’est pas une spécification de format.
   - **Hypothèse de cette implémentation :** seule une chaîne décimale strictement positive, sans zéro initial, est acceptée. Sont refusés le signe, l’espace, le chiffre non ASCII et tout autre caractère. Cette règle étend l’exemple officiel ; elle n’est pas énoncée par GitHub.
-- **À confirmer avant de rendre `actor_id` obligatoire.** Ni cette représentation ni la présence du claim dans un jeton réel n’ont été vérifiées : aucun jeton réel n’a été demandé ni utilisé. Si un jeton réel montrait une autre représentation, cette implémentation le refuserait (échec fermé) et l’hypothèse devrait être revue avant toute utilisation.
-- **Facultatif.** `actor_id` ne fait pas partie des claims obligatoires. S’il est absent, le champ vaut `None`. S’il est présent, toute valeur qui ne suit pas l’hypothèse ci-dessus fait refuser le jeton, y compris `null`, un nombre JSON ou une liste. Le message est générique et ne reprend pas la valeur.
+- **Vérification réelle toujours en attente.** Ni cette représentation ni la présence du claim dans un jeton réel n’ont été vérifiées : aucun jeton réel n’a été demandé ni utilisé. La décision ultérieure de rendre le claim obligatoire ne constitue pas cette vérification. Si un jeton réel montrait une autre représentation, l’implémentation le refuserait (échec fermé) et l’hypothèse devrait être revue avant toute utilisation.
+- **Contrat initial du 18 octobre, remplacé le 24 octobre.** À cette date, `actor_id` ne faisait pas partie des claims obligatoires et valait `None` s’il était absent. S’il était présent, toute valeur qui ne suivait pas l’hypothèse ci-dessus faisait refuser le jeton, y compris `null`, un nombre JSON ou une liste. Le message ne reprenait pas la valeur.
 - **`actor` n’est pas une identité.** Ce nom de connexion, renommable, est conservé pour l’affichage seulement. Aucune décision d’identité ne l’utilise et il ne remplace jamais un `actor_id` absent, même s’il ne contient que des chiffres.
 - **`run_attempt` inchangé.** La politique existante, qui n’accepte que la première tentative, est conservée telle quelle. Elle n’est pas présentée comme une conséquence de la sémantique de `actor_id`.
-- **Tests synthétiques.** `tests/test_g2_oidc_verifier.py` passe de 11 à 15 tests. Les jetons sont signés avec des clés RSA générées localement. Les tests couvrent : valeurs décimales valides ; absence du claim ; vingt formes invalides ; indépendance vis-à-vis de `actor` (identifiant de connexion renommé, identifiant de connexion numérique sans `actor_id`, `actor_id` sans `actor`). Quatre mutations temporaires font échouer ces tests : `null` traité comme une absence, format non vérifié, identifiant de connexion numérique pris pour l’identité, champ abandonné. Le fichier a été restauré à l’identique.
+- **Tests synthétiques.** `tests/test_g2_oidc_verifier.py` est passé de 11 à 15 tests le 18 octobre. Les jetons sont signés avec des clés RSA générées localement. Depuis la décision du 24 octobre, les tests couvrent : valeurs décimales valides ; refus d’un jeton sans `actor_id` ; vingt formes invalides ; indépendance vis-à-vis de `actor` (identifiant de connexion renommé, `actor_id` sans `actor`). Un identifiant de connexion numérique ne remplace jamais `actor_id` : sans `actor_id`, le jeton est refusé ; avec un `actor_id` mal formé, il l’est aussi. Les quatre mutations temporaires décrites le 18 octobre (`null` traité comme une absence, format non vérifié, identifiant de connexion numérique pris pour l’identité, champ abandonné) visaient le contrat facultatif ; elles n’ont pas été rejouées sur le contrat obligatoire.
 - **Inchangés.** Le registre SQLite, l’énoncé d’approbation, le Gate, les workflows et les dépendances ne changent pas. Aucun lien n’est créé entre un credential et un compte GitHub.
 
 **Ce qui reste nécessaire pour D-5.**
 
-- Confirmer sur un jeton réel la présence de `actor_id` et sa représentation, avant de rendre ce claim obligatoire. Cet essai exige une autorisation explicite et distincte du propriétaire.
+- Confirmer sur un jeton réel la présence de `actor_id` et sa représentation avant de considérer cette source réelle comme vérifiée. Le code l’exige désormais, mais cela ne prouve pas que les jetons réels le portent. Tout essai exige une autorisation explicite et distincte du propriétaire ; aucun essai n’est actuellement autorisé.
 - Choisir la racine de confiance de la liaison entre comptes GitHub et approbateurs : registre administré hors bande, et éventuellement preuve de contrôle du compte.
 - Exiger que tout compte capable de déclencher un run soit inscrit dans ce registre.
 - Admettre que cette liaison établit au mieux une séparation des comptes, pas une séparation des personnes (D-15). Une seconde personne reste nécessaire.
@@ -898,7 +900,7 @@ Treize mutations temporaires font échouer ces tests, puis le fichier a été re
 - Décider qui administre le registre, quelle preuve est consignée lors de l’inscription d’un compte et comment le monde fermé est confronté aux comptes ayant accès au dépôt (D-15).
 - Ajouter éventuellement une preuve de contrôle du compte, par exemple une liaison OIDC dédiée.
 - Disposer d’une seconde personne, et empêcher l’administrateur du registre d’être son propre déclencheur.
-- Confirmer `actor_id` sur un jeton réel avant de le rendre obligatoire, avec une autorisation explicite et distincte.
+- Confirmer la présence et la représentation de `actor_id` sur un jeton réel avant de considérer cette source réelle comme vérifiée. Le vérificateur l’exige désormais par décision ultérieure du propriétaire ; tout essai réel exige une autorisation explicite et distincte.
 - Brancher ce contrôle sur le registre durable, et décider s’il faut inclure l’acteur dans l’énoncé signé.
 
 Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
@@ -914,7 +916,7 @@ Aucun jeton OIDC réel, credential réel, secret, appel Higgsfield, génération
 - **Liaison au défi.** `run_actor_id` fait partie des octets canoniques, de l’empreinte et donc du défi WebAuthn : un autre acteur produit un autre défi. Le domaine du défi devient `AI_DIRECTOR_APPROVAL_WEBAUTHN_V2\x00`, ce qui sépare explicitement les défis des versions 1 et 2.
 - **Version 1 non prise en charge.** `statement_version` vaut 2 et n’est pas fourni par l’appelant. Un jeu de champs v1, sans `run_actor_id`, ne construit plus d’énoncé. Le registre durable, inchangé, refuse déjà à la relecture tout énoncé stocké dont la version diffère de celle du code. Aucune migration n’est prévue, puisqu’aucune base n’est déployée.
 - **Ce qui n’a pas changé.** Le code de production du registre SQLite, son schéma, `oidc_verifier.py`, le Gate, les workflows et la consommation sont inchangés. Le registre stocke les énoncés v2 tels quels, donc avec `run_actor_id` dans le JSON canonique signé. Il n’en fait toutefois ni colonne, ni contrôle, ni usage dans une décision. La docstring du registre (« records no GitHub actor ») et le test `test_no_github_actor_is_recorded_while_d5_is_unresolved`, qui ne vérifie que le schéma, devront être précisés lors du raccordement du registre.
-- **Conséquence.** `actor_id` reste facultatif dans le vérificateur OIDC. Mais un run dont le jeton ne le porte pas ne peut pas produire d’énoncé v2. Sa présence et sa représentation dans un jeton réel restent à confirmer, avec une autorisation explicite et distincte ; aucun jeton réel n’a été demandé ni utilisé.
+- **Conséquence à cette date (18 octobre).** `actor_id` restait facultatif dans le vérificateur OIDC. Un run dont le jeton ne le portait pas ne pouvait pas produire d’énoncé v2. La décision du propriétaire du 24 octobre a ensuite rendu le claim obligatoire dans le vérificateur. Sa présence et sa représentation dans un jeton réel restent à confirmer, avec une autorisation explicite et distincte ; aucun jeton réel n’a été demandé ni utilisé.
 
 **Ce que prouvent les tests.** `tests/test_g2_approval_statement.py` passe de 8 à 13 tests :
 
@@ -1123,6 +1125,27 @@ Le job Ubuntu `posix-approval-store` exécutera ce module sous Linux ; il n’a 
 - Aucun principal fictif, aucun mode à une personne et aucun contournement dégradé ne doit être introduit. Un second principal ou un second compte contrôlé par le propriétaire ne satisfait pas la séparation humaine de D-5 (§4.12).
 - Une preuve P-1 de contrôle d’un compte GitHub ne prouverait pas la séparation des personnes. Elle établirait au mieux que le titulaire d’un compte a pu lancer un workflow à un instant donné, sans identifier la personne ni montrer que deux personnes distinctes interviennent.
 - La conception et l’implémentation de l’administration et de l’inscription du registre attendront cette désignation. Cela couvre la frontière d’administration, la genèse, la séparation entre administrateur et approbateurs, la confirmation des ajouts par un autre principal, la preuve P-1, les invitations et la confirmation WebAuthn des opérations d’administration.
+
+**Mise à jour de la décision du propriétaire (23 octobre 2026) : approbatrice B désignée.** Le propriétaire désigne la personne déjà choisie et en attente comme approbatrice B. Cette décision remplace, à compter de cette date, le constat du 19 octobre selon lequel aucune seconde personne n’était disponible. Aucun nom, identifiant de compte ni credential n’est consigné ici.
+
+- La disponibilité et la désignation d’une seconde personne réelle sont désormais confirmées par le propriétaire. La conception et les travaux locaux ou mock-only du processus d’administration et d’inscription peuvent commencer.
+- Cette désignation ne crée aucune inscription, liaison de compte GitHub, liaison de credential WebAuthn ni preuve technique de séparation. La personne devra encore être inscrite au moyen d’un processus authentifié et vérifiable, conforme aux décisions D-2, D-9 et D-15.
+- D-5 reste non résolu jusqu’à ce que le service établisse et vérifie la séparation des personnes et des comptes. Aucune consommation d’approbation n’est autorisée avant cette validation ; `Provider = CLOSED` et `NO-GO` restent en vigueur.
+- La présence et le format de `actor_id` dans un jeton OIDC réel restent à confirmer séparément, avec l’autorisation explicite prévue plus haut. Aucun jeton réel ni credential réel n’est autorisé par la présente désignation.
+
+**Mise à jour de la décision du propriétaire (23 octobre 2026) : frontière d’administration et d’approbation.** Le propriétaire confirme qu’il gère seul l’administration du service ; B intervient comme approbatrice uniquement.
+
+- Le propriétaire est le seul administrateur du registre, par le mécanisme SSH d’administration prévu par D-2. B ne reçoit aucun rôle ni droit d’administration : elle ne crée ni ne révoque de comptes, d’approbateurs, de credentials ou d’invitations.
+- B est la personne désignée pour les approbations. Le propriétaire n’est pas ajouté comme approbateur dans ce parcours. D-5 continue d’exiger que B soit distincte de l’acteur GitHub du run ; si B lance elle-même un run, la demande doit être refusée.
+- Cette décision fixe les rôles, pas leur preuve technique. L’autorisation du compte SSH du propriétaire, l’audit des opérations administratives, la preuve de liaison entre B et son compte, et le mode de vérification de la séparation restent à spécifier et à valider.
+- Le dépôt AI_DIRECTOR étant public, B peut lire et examiner le code sans invitation ni droit d’écriture. Cela ne prouve ni son identité ni sa liaison au registre ; aucun droit d’écriture GitHub ne découle de cette décision.
+- Aucun compte, credential, secret ou jeton OIDC réel n’est créé ou utilisé par cette décision. D-5 reste non résolu jusqu’à validation du mécanisme ; aucune consommation d’approbation n’est autorisée et `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+**Décision du propriétaire (24 octobre 2026) : conserver `actor_id` obligatoire dans le vérificateur OIDC.** Le propriétaire choisit de maintenir le refus fermé si le claim est absent ou mal formé, même si sa présence et sa représentation dans un jeton OIDC réel n’ont pas encore été confirmées.
+
+- `actor_id` fait partie des claims obligatoires du vérificateur. Après vérification réussie, l’identité du run porte toujours un identifiant de compte sous forme de chaîne ; `actor` reste facultatif et réservé à l’affichage.
+- La forme décimale ASCII strictement positive, sans zéro initial, demeure une hypothèse de l’implémentation ; ce n’est pas une garantie documentée ici par GitHub. Un claim absent est refusé par la validation des claims requis ; le jeton et ses valeurs ne sont pas repris dans le message d’erreur.
+- Cette décision fixe le contrat du code, mais ne confirme pas le contenu d’un jeton réel et n’autorise aucun essai avec un jeton réel. Une autorisation explicite et distincte sera nécessaire avant tout essai. D-5 reste non résolu ; aucune consommation d’approbation n’est autorisée et `Provider = CLOSED` et `NO-GO` restent en vigueur.
 
 Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
 
