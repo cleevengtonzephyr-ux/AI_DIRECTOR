@@ -125,46 +125,48 @@ Le job `posix-approval-store` lance maintenant les suites v3 et v4 sous Ubuntu, 
 
 ## Deuxième incrément de code — inscription en attente, schéma v5 mock-only (24 octobre 2026)
 
-Le module `approval_service/approval_service/approval_store_v5.py` ajoute un schéma 5 frais. Il reprend le schéma 3 à l’identique et lui ajoute trois tables : `enrollment_invitations`, `pending_enrollments` et `enrollment_confirmations`. Le schéma 4 et son module ne sont pas modifiés. Aucune migration n’existe : `initialize` refuse tout fichier existant (v3, v4, v5 ou vide) sans le modifier, et chacune des trois versions refuse d’ouvrir les fichiers des deux autres.
+Le module `approval_service/approval_service/approval_store_v5.py` ajoute un schéma 5 frais. Il reprend le schéma 3 à l’identique et lui ajoute deux tables : `enrollment_invitations` et `pending_enrollments`. Le schéma 4 et son module ne sont pas modifiés. Aucune migration n’existe : `initialize` refuse tout fichier existant (v3, v4, v5 ou vide) sans le modifier, et chacune des trois versions refuse d’ouvrir les fichiers des deux autres.
 
 **Fonctionnement**
 
 - **Invitation.** `create_invitation` lie l’invitation à un `approver_id`, à un `principal_id` et à l’ID numérique attendu du compte GitHub de B (`expected_account_id`). Elle est refusée si l’une de ces valeurs est déjà enregistrée, déjà invitée ou déjà en attente. Comme en v4, seule l’empreinte SHA-256 du secret est stockée.
-- **Consommation.** `consume_invitation` reçoit le secret, l’ID de compte lu par l’appelant et les champs du credential WebAuthn. Si l’ID diffère de l’ID attendu, rien n’est écrit et l’invitation reste ouverte. Sinon, dans une seule transaction `BEGIN IMMEDIATE`, l’invitation passe à `CONSUMED` et une inscription `PENDING` est créée avec la preuve `EXPECTED_GITHUB_USER_ID_MATCHED` et le credential. Aucune ligne de principal, d’approbateur, de compte GitHub ou de credential n’est créée : les opérations héritées de v3 n’en voient aucune.
-- **Confirmation.** `confirm_enrollment` active l’inscription dans une seule transaction : la trace `UNAUTHENTICATED_MOCK_CONFIRMATION` est écrite dans `enrollment_confirmations`, puis le principal, l’approbateur, le compte GitHub et le credential sont insérés `ACTIVE`, et l’inscription passe à `CONFIRMED`. Tout échec annule l’ensemble. Un déclencheur refuse `CONFIRMED` sans la trace et sans les lignes actives correspondantes.
-- **Rejet.** `reject_enrollment` clôt une inscription `PENDING` en `REJECTED`, sans rien activer. Les états `CONFIRMED` et `REJECTED` sont définitifs : une seconde confirmation, ou une confirmation après rejet, est refusée.
+- **Consommation.** `consume_invitation` reçoit le secret, un ID de compte fourni par l’appelant et les champs du credential WebAuthn. Si l’ID diffère de l’ID attendu, rien n’est écrit et l’invitation reste ouverte. Sinon, dans une seule transaction `BEGIN IMMEDIATE`, l’invitation passe à `CONSUMED` et une inscription `PENDING` est créée avec le credential et le contrôle `MOCK_UNVERIFIED_ACCOUNT_ID_MATCH`.
+- **Aucune activation.** Aucune frontière SSH authentifiée n’existe ; le schéma v5 n’a donc ni primitive de confirmation ni état `CONFIRMED`. Une inscription ne peut que rester `PENDING` ou être clôturée `REJECTED` par `reject_enrollment`, sans rien activer ; `REJECTED` est définitif. Le module n’écrit jamais de ligne de principal, d’approbateur, de compte GitHub ou de credential : les opérations héritées de v3 ne voient aucune inscription.
 - **Aucune expiration.** Une inscription en attente n’a pas de délai d’expiration et `expire_invitations` ne la modifie pas. Sa durée reste à décider.
 
-**Traces distinctes de `ADMIN_ATTESTED`.** La preuve de compte (`pending_enrollments.account_proof`) et la confirmation (`enrollment_confirmations.evidence`) sont enregistrées dans leurs propres tables. La table v3 `github_accounts` n’accepte que `ADMIN_ATTESTED` : la ligne de compte créée à la confirmation porte donc cette valeur, écrite par une primitive non authentifiée. Elle ne doit pas être lue comme une attestation réelle du propriétaire.
+**Ni preuve GitHub, ni attestation.** `MOCK_UNVERIFIED_ACCOUNT_ID_MATCH` enregistre seulement que deux identifiants fournis par l’appelant étaient égaux. Ce n’est ni une preuve de contrôle du compte GitHub, ni une attestation administrative `ADMIN_ATTESTED`. Des contraintes SQLite refusent tout autre libellé, l’état `CONFIRMED` et toute réouverture d’une inscription rejetée, y compris par SQL direct.
+
+**Correction avant fusion (24 octobre 2026).** La première version de ce schéma, poussée sur la branche du PR #62 sans être fusionnée, contenait une primitive `confirm_enrollment`. Celle-ci activait le principal, l’approbateur, le compte GitHub et le credential, et marquait le compte `ADMIN_ATTESTED`, alors qu’elle n’authentifiait aucun administrateur. Le contrôle s’appelait en outre `EXPECTED_GITHUB_USER_ID_MATCHED`, ce qui pouvait passer pour une preuve GitHub réelle. Cette primitive, sa table de traces et l’état `CONFIRMED` sont retirés, et le contrôle est renommé. La conception de l’activation est reportée à l’étape qui établira la frontière SSH authentifiée.
 
 **Limites**
 
-- **Non authentifié.** Ces primitives ne vérifient ni l’identité du propriétaire ni une confirmation SSH. Elles sont réservées aux tests isolés et ne sont exposées par aucune interface ni aucun endpoint.
+- **Non authentifié.** Ces primitives n’authentifient aucun appelant. Elles sont réservées aux tests isolés et ne sont exposées par aucune interface ni aucun endpoint.
 - **Rien n’est vérifié en amont.** Le module n’exécute aucun échange OAuth et ne vérifie aucune cérémonie d’inscription WebAuthn (défi, origine, RP ID, UV, attestation, règles D-3 et D-4). L’appelant fournit l’ID de compte et le credential ; ce dernier doit seulement pouvoir être lu comme `AttestedCredentialData`.
-- **H1 reste ouverte.** L’ID enregistré est l’ID REST que lirait le futur flux de la GitHub App avec `GET /user`. Le contrôle de séparation v3 compare `github_accounts` au claim `actor_id` OIDC, mais l’équivalence entre les deux identifiants n’est pas établie. Aucun jeton OIDC réel n’est autorisé.
+- **H1 reste ouverte.** L’ID fourni représente l’ID REST que lirait le futur flux de la GitHub App avec `GET /user`. Son équivalence avec le claim `actor_id` OIDC n’est pas établie. Aucun jeton OIDC réel n’est autorisé.
+- **Activation à concevoir.** La confirmation par le propriétaire, la représentation de la preuve de compte GitHub distincte de `ADMIN_ATTESTED` dans le registre (la table v3 `github_accounts` n’accepte que cette valeur) et la trace de confirmation restent à concevoir avec la frontière SSH authentifiée.
 - **Hors périmètre.** Une inscription porte un seul credential ; le second authentificateur, destiné au secours (D-3), relève d’une cérémonie séparée qui n’est pas conçue ici. Le module n’ajoute ni OAuth, ni callback public (D-12), ni authentification SSH, ni compte réel, ni jeton, ni secret, ni Provider.
 
-**Validation locale (24 octobre 2026).** `tests/test_g2_approval_store_v5.py` ajoute 31 tests synthétiques. Ils utilisent des bases temporaires, des ID de compte fictifs et des credentials construits à partir de clés EC générées localement. Ils vérifient :
+**Validation locale (24 octobre 2026).** `tests/test_g2_approval_store_v5.py` contient 27 tests synthétiques. Ils utilisent des bases temporaires, des ID de compte fictifs et des credentials construits à partir de clés EC générées localement. Ils vérifient :
 
 - un schéma 5 créé seulement dans un nouveau fichier ; les fichiers v3, v4, v5 ou vides existants restent identiques octet pour octet, et les trois versions se refusent mutuellement ;
 - la consommation vers l’état `PENDING`, sans aucune ligne de registre ou de credential, et le refus sans écriture d’un ID de compte différent ou d’un credential mal formé, déjà inscrit ou déjà en attente ;
+- un retour arrière complet si l’écriture de l’inscription échoue après le passage de l’invitation à `CONSUMED` ;
+- l’absence de toute primitive ou de tout état de confirmation, et l’absence de toute ligne `github_accounts`, `ADMIN_ATTESTED` ou non, après consommation, rejet, révocation et expiration ;
+- le caractère définitif du rejet et le refus des transitions répétées ou invalides ;
+- le refus, par SQL direct, de confirmer, de réétiqueter le contrôle en `ADMIN_ATTESTED` ou en preuve GitHub, de réécrire ou de supprimer une inscription ;
 - l’absence d’expiration d’une inscription en attente ;
-- l’activation atomique à la confirmation, avec une trace distincte de `ADMIN_ATTESTED` ;
-- le refus d’une seconde confirmation, d’une confirmation après rejet, d’une confirmation sans consommation et de tout identifiant mal formé ;
-- un retour arrière complet si une insertion échoue, ou si la dernière écriture échoue après toutes les insertions ;
-- le refus, par SQL direct, de créer, confirmer, réécrire ou supprimer une inscription ou une trace de confirmation ;
-- la concurrence entre six fils d’exécution, pour la consommation comme pour la confirmation.
+- la concurrence entre six fils d’exécution sur la consommation d’une même invitation.
 
-Sept mutations temporaires, appliquées à une copie hors du dépôt, ont toutes été détectées : activation dès la consommation, comparaison de l’ID supprimée, seconde confirmation acceptée, expiration des inscriptions en attente, trace notée `ADMIN_ATTESTED`, déclencheur de création neutralisé, et déclencheur d’activation neutralisé avec un credential non inséré.
+Huit mutations temporaires, appliquées à une copie hors du dépôt, ont toutes été détectées : activation dès la consommation, comparaison de l’ID supprimée, contrôle réétiqueté en preuve GitHub, état `CONFIRMED` admis, expiration des inscriptions en attente, déclencheur de création neutralisé, primitive de confirmation rétablie avec une ligne `ADMIN_ATTESTED`, et échec d’écriture ignoré après le passage à `CONSUMED`.
 
 Résultats sous Windows, Python 3.14.5, avec les dépendances verrouillées installées dans un dossier temporaire hors du dépôt :
 
-- tests ciblés : 31 tests OK ;
-- tests G2 : 228 tests OK (2 ignorés) ;
-- suite complète : 3220 tests OK (2 ignorés) ;
+- tests ciblés : 27 tests OK ;
+- tests G2 : 224 tests OK (2 ignorés) ;
+- suite complète : 3216 tests OK (2 ignorés) ;
 - audit d’architecture : `NO_DRIFT`.
 
-Le job `posix-approval-store` lance aussi la suite v5 sous Ubuntu, et son test de contrat CI est mis à jour. Le comportement Linux ne sera confirmé qu’après le prochain passage de ce job. D-5 reste non résolu ; Provider = CLOSED et NO-GO restent en vigueur.
+Le job `posix-approval-store` lance aussi la suite v5 sous Ubuntu. Le comportement Linux de cette version corrigée ne sera confirmé qu’après le prochain passage de ce job. D-5 reste non résolu ; Provider = CLOSED et NO-GO restent en vigueur.
 
 ## Limites
 

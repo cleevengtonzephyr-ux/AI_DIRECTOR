@@ -1,26 +1,30 @@
-"""Mock-only G2 approval store schema v5: pending enrollments, confirmed apart.
+"""Mock-only G2 approval store schema v5: enrollments that stay pending.
 
 This is a fresh-file schema. It does not migrate or modify schema v3 or v4:
 both stores keep rejecting a v5 database, ``initialize`` never reuses an
 existing file, and opening accepts only a file whose objects are exactly
 those of schema v5. The inherited approval-request operations use the same
-immutable v3 contract plus three enrollment tables.
+immutable v3 contract plus two enrollment tables.
 
-Consuming an invitation only records a PENDING enrollment: no principal,
-approver, GitHub account or credential row exists before a separate
-confirmation, which inserts them all ACTIVE in one transaction and leaves a
-confirmation trace distinct from the ``ADMIN_ATTESTED`` registry evidence.
-A pending enrollment has no expiry: its lifetime is not decided here.
+Consuming an invitation only records a PENDING enrollment. No principal,
+approver, GitHub account or credential row is ever written by this module:
+activation needs a real confirmation by the owner over an authenticated SSH
+boundary, which does not exist, so this schema has no confirmation and no
+CONFIRMED state. A pending enrollment can only stay PENDING or be REJECTED.
+It has no expiry: its lifetime is not decided here.
+
+The account check stored with an enrollment, ``MOCK_UNVERIFIED_ACCOUNT_ID_MATCH``,
+only records that two caller-supplied identifiers were equal. It is not a
+GitHub proof, nor an administrator attestation (``ADMIN_ATTESTED``).
 
 This module is storage machinery only. Its primitives are unauthenticated
-and reserved for isolated tests: they authenticate no administrator and do
-not verify that the owner confirmed anything over SSH; they must not be
-exposed through any interface or endpoint, nor connected to a Provider. They
-run no OAuth exchange and verify no WebAuthn registration: the caller
-supplies the GitHub account ID and the credential. That account ID is the
-REST user ID that the future GitHub App flow would read with ``GET /user``;
-whether it equals an OIDC ``actor_id`` (H1) is not established. No person's
-identity is proved, and G1 D-5 stays unresolved.
+and reserved for isolated tests: they authenticate no administrator and
+must not be exposed through any interface or endpoint, nor connected to a
+Provider. They run no OAuth exchange and verify no WebAuthn registration:
+the caller supplies the GitHub account ID and the credential. That account
+ID stands for the REST user ID that the future GitHub App flow would read
+with ``GET /user``; whether it equals an OIDC ``actor_id`` (H1) is not
+established. No person's identity is proved, and G1 D-5 stays unresolved.
 """
 
 from __future__ import annotations
@@ -50,18 +54,15 @@ SCHEMA_VERSION = 5
 APPLICATION_ID = _v3.APPLICATION_ID
 DEFAULT_BUSY_TIMEOUT_SECONDS = _v3.DEFAULT_BUSY_TIMEOUT_SECONDS
 MAX_BUSY_TIMEOUT_SECONDS = _v3.MAX_BUSY_TIMEOUT_SECONDS
-# Proof kind of a pending enrollment: the caller states that the GitHub user
-# ID it read matched the expected ID of the invitation. Not ADMIN_ATTESTED.
-ACCOUNT_PROOF = "EXPECTED_GITHUB_USER_ID_MATCHED"
-# Trace of a confirmation. The primitive authenticates nobody, and says so.
-CONFIRMATION_EVIDENCE = "UNAUTHENTICATED_MOCK_CONFIRMATION"
+# Account check of a pending enrollment: two caller-supplied IDs were equal.
+# Nothing was verified with GitHub; this is neither a proof nor an attestation.
+ACCOUNT_CHECK = "MOCK_UNVERIFIED_ACCOUNT_ID_MATCH"
 _MAX_SQLITE_INTEGER = (1 << 63) - 1
 _MAX_SIGN_COUNT = 4294967295
 _MAX_USER_HANDLE_BYTES = 64
 _INVITATION_ID = re.compile(r"^[0-9a-f]{32}$")
 _SECRET = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _INVITATION_UNAVAILABLE = "invitation is invalid or unavailable"
-_ENROLLMENT_UNAVAILABLE = "enrollment is unknown or not pending"
 
 _ENROLLMENT_SCHEMA = (
     f"""CREATE TABLE enrollment_invitations (
@@ -116,10 +117,11 @@ _ENROLLMENT_SCHEMA = (
         )
         BEGIN SELECT RAISE(ABORT, 'existing invitation rows are never replaced'); END""",
     # One pending enrollment per consumed invitation. It holds the credential
-    # until confirmation; nothing here is read by the v3 approval operations.
+    # fields; nothing here is read by the v3 approval operations, and no state
+    # activates it: CONFIRMED does not exist without an authenticated SSH boundary.
     """CREATE TABLE pending_enrollments (
         invitation_id TEXT PRIMARY KEY REFERENCES enrollment_invitations (invitation_id),
-        account_proof TEXT NOT NULL CHECK (account_proof = 'EXPECTED_GITHUB_USER_ID_MATCHED'),
+        account_check TEXT NOT NULL CHECK (account_check = 'MOCK_UNVERIFIED_ACCOUNT_ID_MATCH'),
         credential_id BLOB NOT NULL UNIQUE CHECK (length(credential_id) BETWEEN 16 AND 1023),
         credential_data BLOB NOT NULL,
         user_handle BLOB NOT NULL CHECK (length(user_handle) BETWEEN 1 AND 64),
@@ -127,7 +129,7 @@ _ENROLLMENT_SCHEMA = (
         backup_state INTEGER NOT NULL CHECK (backup_state IN (0, 1) AND backup_state <= backup_eligible),
         sign_count INTEGER NOT NULL CHECK (sign_count BETWEEN 0 AND 4294967295),
         created_at_ms INTEGER NOT NULL CHECK (created_at_ms > 0),
-        state TEXT NOT NULL CHECK (state IN ('PENDING', 'CONFIRMED', 'REJECTED')),
+        state TEXT NOT NULL CHECK (state IN ('PENDING', 'REJECTED')),
         closed_at_ms INTEGER,
         CHECK ((state = 'PENDING') = (closed_at_ms IS NULL)),
         CHECK (closed_at_ms IS NULL OR closed_at_ms >= created_at_ms)
@@ -141,13 +143,13 @@ _ENROLLMENT_SCHEMA = (
     """CREATE TRIGGER pending_enrollments_permanent BEFORE DELETE ON pending_enrollments
         BEGIN SELECT RAISE(ABORT, 'enrollments are never deleted'); END""",
     """CREATE TRIGGER pending_enrollments_identity_immutable
-        BEFORE UPDATE OF invitation_id, account_proof, credential_id, credential_data, user_handle,
+        BEFORE UPDATE OF invitation_id, account_check, credential_id, credential_data, user_handle,
             backup_eligible, backup_state, sign_count, created_at_ms ON pending_enrollments
         BEGIN SELECT RAISE(ABORT, 'enrollment content is immutable'); END""",
     """CREATE TRIGGER pending_enrollments_transitions BEFORE UPDATE ON pending_enrollments
         WHEN NOT (
             OLD.state = 'PENDING'
-            AND NEW.state IN ('CONFIRMED', 'REJECTED')
+            AND NEW.state = 'REJECTED'
             AND NEW.closed_at_ms IS NOT NULL
         )
         BEGIN SELECT RAISE(ABORT, 'enrollment transition is not allowed'); END""",
@@ -157,42 +159,6 @@ _ENROLLMENT_SCHEMA = (
     _v3._never_replaced(
         "pending_enrollments", "invitation_id = NEW.invitation_id OR credential_id = NEW.credential_id"
     ),
-    # Append-only confirmation trace, separate from ADMIN_ATTESTED.
-    """CREATE TABLE enrollment_confirmations (
-        invitation_id TEXT PRIMARY KEY REFERENCES pending_enrollments (invitation_id),
-        evidence TEXT NOT NULL CHECK (evidence = 'UNAUTHENTICATED_MOCK_CONFIRMATION'),
-        confirmed_at_ms INTEGER NOT NULL CHECK (confirmed_at_ms > 0)
-    ) STRICT""",
-    """CREATE TRIGGER enrollment_confirmations_of_pending BEFORE INSERT ON enrollment_confirmations
-        WHEN NOT EXISTS (
-            SELECT 1 FROM pending_enrollments WHERE invitation_id = NEW.invitation_id AND state = 'PENDING'
-        )
-        BEGIN SELECT RAISE(ABORT, 'only a pending enrollment can be confirmed'); END""",
-    """CREATE TRIGGER enrollment_confirmations_append_only_update BEFORE UPDATE ON enrollment_confirmations
-        BEGIN SELECT RAISE(ABORT, 'confirmations are append-only'); END""",
-    """CREATE TRIGGER enrollment_confirmations_append_only_delete BEFORE DELETE ON enrollment_confirmations
-        BEGIN SELECT RAISE(ABORT, 'confirmations are append-only'); END""",
-    _v3._never_replaced("enrollment_confirmations", "invitation_id = NEW.invitation_id"),
-    # CONFIRMED requires the confirmation trace and the activated rows, which
-    # the confirmation inserts first, in the same transaction.
-    """CREATE TRIGGER pending_enrollments_confirmed_activated BEFORE UPDATE ON pending_enrollments
-        WHEN NEW.state = 'CONFIRMED' AND NOT (
-            EXISTS (SELECT 1 FROM enrollment_confirmations WHERE invitation_id = NEW.invitation_id)
-            AND EXISTS (
-                SELECT 1 FROM credentials
-                JOIN approvers USING (approver_id)
-                JOIN enrollment_invitations AS invitation
-                    ON invitation.approver_id = approvers.approver_id
-                    AND invitation.principal_id = approvers.principal_id
-                JOIN github_accounts AS account
-                    ON account.account_id = invitation.expected_account_id
-                    AND account.principal_id = invitation.principal_id
-                WHERE credentials.credential_id = NEW.credential_id
-                    AND invitation.invitation_id = NEW.invitation_id
-                    AND credentials.state = 'ACTIVE' AND approvers.state = 'ACTIVE' AND account.state = 'ACTIVE'
-            )
-        )
-        BEGIN SELECT RAISE(ABORT, 'a confirmed enrollment requires its trace and activated rows'); END""",
 )
 
 _SCHEMA = _v3._SCHEMA + _ENROLLMENT_SCHEMA
@@ -229,23 +195,12 @@ class EnrollmentCredential:
 
 @dataclass(frozen=True, slots=True)
 class PendingEnrollment:
-    """An enrollment recorded PENDING; nothing is active yet."""
+    """An enrollment recorded PENDING; this module never activates it."""
 
     invitation_id: str
     approver_id: str
     principal_id: str
     account_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class ConfirmedEnrollment:
-    """Registry and credential rows activated by one confirmation."""
-
-    invitation_id: str
-    approver_id: str
-    principal_id: str
-    account_id: str
-    credential_id: bytes
 
 
 @functools.cache
@@ -333,9 +288,10 @@ def _checked_credential(credential: object) -> tuple[bytes, EnrollmentCredential
 class ApprovalStoreV5(ApprovalStore):
     """Fresh-file schema v5 store with mock-only pending enrollments.
 
-    All inherited v3 request and revocation operations remain available and
-    see only confirmed enrollments. Every enrollment primitive below is
-    unauthenticated and reserved for isolated tests.
+    All inherited v3 request and revocation operations remain available; no
+    enrollment ever reaches them, since none can be activated here. Every
+    enrollment primitive below is unauthenticated and reserved for isolated
+    tests.
     """
 
     @classmethod
@@ -481,11 +437,12 @@ class ApprovalStoreV5(ApprovalStore):
     ) -> PendingEnrollment:
         """Consume once and record a PENDING enrollment; activate nothing.
 
-        ``account_id`` is the GitHub user ID the caller read; it must equal
-        the invitation's expected ID, otherwise nothing is written and the
-        invitation stays open. Neither the ID nor the credential is verified
-        against GitHub or a WebAuthn ceremony here. Unauthenticated; reserved
-        for isolated tests.
+        ``account_id`` is a caller-supplied stand-in for the GitHub user ID; it
+        must equal the invitation's expected ID, otherwise nothing is written
+        and the invitation stays open. The equality is recorded as
+        ``MOCK_UNVERIFIED_ACCOUNT_ID_MATCH``: neither the ID nor the credential
+        is verified against GitHub or a WebAuthn ceremony here.
+        Unauthenticated; reserved for isolated tests.
         """
 
         if type(secret) is not str or _SECRET.fullmatch(secret) is None:
@@ -529,13 +486,13 @@ class ApprovalStoreV5(ApprovalStore):
                         (now, invitation_id),
                     )
                     connection.execute(
-                        "INSERT INTO pending_enrollments (invitation_id, account_proof, credential_id,"
+                        "INSERT INTO pending_enrollments (invitation_id, account_check, credential_id,"
                         " credential_data, user_handle, backup_eligible, backup_state, sign_count,"
                         " created_at_ms, state, closed_at_ms)"
                         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', NULL)",
                         (
                             invitation_id,
-                            ACCOUNT_PROOF,
+                            ACCOUNT_CHECK,
                             credential_id,
                             credential.credential_data,
                             credential.user_handle,
@@ -553,74 +510,6 @@ class ApprovalStoreV5(ApprovalStore):
         if expired or pending is None:
             raise ApprovalRefusedError(_INVITATION_UNAVAILABLE)
         return pending
-
-    def confirm_enrollment(self, invitation_id: str) -> ConfirmedEnrollment:
-        """Activate a PENDING enrollment and all its rows in one transaction.
-
-        One ``BEGIN IMMEDIATE`` transaction records the confirmation trace
-        (``UNAUTHENTICATED_MOCK_CONFIRMATION``), inserts the principal, the
-        approver, the GitHub account and the credential ACTIVE, then marks the
-        enrollment CONFIRMED. Any failure rolls all of it back. The registry
-        column ``github_accounts.evidence`` only accepts ``ADMIN_ATTESTED``;
-        the account proof and the confirmation stay recorded apart from it.
-
-        This method does not authenticate its caller and does not prove that
-        the owner confirmed over SSH; it is reserved for isolated tests and
-        must not be exposed through any interface or endpoint.
-        """
-
-        invitation_id = _require_invitation_id(invitation_id)
-        with self._write_transaction() as connection:
-            now = self._observe_clock(connection)
-            row = connection.execute(
-                "SELECT approver_id, principal_id, expected_account_id, credential_id, credential_data,"
-                " user_handle, backup_eligible, backup_state, sign_count, pending_enrollments.state"
-                " FROM pending_enrollments JOIN enrollment_invitations USING (invitation_id)"
-                " WHERE invitation_id = ?",
-                (invitation_id,),
-            ).fetchone()
-            if row is None or row[9] != "PENDING":
-                raise ApprovalRefusedError(_ENROLLMENT_UNAVAILABLE)
-            (
-                approver_id, principal_id, account_id, credential_id, credential_data,
-                user_handle, backup_eligible, backup_state, sign_count, _state,
-            ) = row
-            try:
-                connection.execute(
-                    "INSERT INTO enrollment_confirmations (invitation_id, evidence, confirmed_at_ms)"
-                    " VALUES (?, ?, ?)",
-                    (invitation_id, CONFIRMATION_EVIDENCE, now),
-                )
-                connection.execute(
-                    "INSERT INTO principals (principal_id, state, revoked_at_ms) VALUES (?, 'ACTIVE', NULL)",
-                    (principal_id,),
-                )
-                connection.execute(
-                    "INSERT INTO approvers (approver_id, principal_id, state, revoked_at_ms)"
-                    " VALUES (?, ?, 'ACTIVE', NULL)",
-                    (approver_id, principal_id),
-                )
-                connection.execute(
-                    "INSERT INTO github_accounts (account_id, principal_id, evidence, attested_at_ms,"
-                    " state, revoked_at_ms) VALUES (?, ?, 'ADMIN_ATTESTED', ?, 'ACTIVE', NULL)",
-                    (account_id, principal_id, now),
-                )
-                connection.execute(
-                    "INSERT INTO credentials (credential_id, credential_data, approver_id, user_handle,"
-                    " backup_eligible, backup_state, sign_count, state, revoked_at_ms)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NULL)",
-                    (credential_id, credential_data, approver_id, user_handle, backup_eligible, backup_state,
-                     sign_count),
-                )
-                connection.execute(
-                    "UPDATE pending_enrollments SET state = 'CONFIRMED', closed_at_ms = ? WHERE invitation_id = ?",
-                    (now, invitation_id),
-                )
-            except sqlite3.IntegrityError:
-                # The context manager rolls the whole transaction back,
-                # including every insert that succeeded before the failure.
-                raise ApprovalRefusedError("enrollment cannot be activated") from None
-        return ConfirmedEnrollment(invitation_id, approver_id, principal_id, account_id, credential_id)
 
     def reject_enrollment(self, invitation_id: str) -> bool:
         """Close a PENDING enrollment as REJECTED without activating anything.
@@ -682,12 +571,10 @@ class ApprovalStoreV5(ApprovalStore):
 
 
 __all__ = [
-    "ACCOUNT_PROOF",
+    "ACCOUNT_CHECK",
     "APPLICATION_ID",
-    "CONFIRMATION_EVIDENCE",
     "SCHEMA_VERSION",
     "ApprovalStoreV5",
-    "ConfirmedEnrollment",
     "EnrollmentCredential",
     "IssuedInvitation",
     "PendingEnrollment",
