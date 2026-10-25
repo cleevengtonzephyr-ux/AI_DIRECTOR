@@ -191,21 +191,15 @@ class OidcVerifierTests(unittest.TestCase):
         with self.assertRaises(OidcVerificationError):
             verifier.verify(self._token())
 
-    def test_actor_and_token_id_remain_optional_until_claim_contract_is_confirmed(self):
+    def test_actor_and_jti_remain_optional_but_actor_id_is_required(self):
         claims = self._claims()
         del claims["actor"]
-        del claims["actor_id"]
         del claims["jti"]
-        token = self._token(claims)
-        decoded = jwt.decode(token, options={"verify_signature": False})
-        self.assertNotIn("actor", decoded)
-        self.assertNotIn("actor_id", decoded)
-        self.assertNotIn("jti", decoded)
 
-        identity = self.verifier.verify(token)
+        identity = self.verifier.verify(self._token(claims))
 
         self.assertIsNone(identity.actor)
-        self.assertIsNone(identity.actor_id)
+        self.assertEqual(identity.actor_id, "12")
         self.assertIsNone(identity.token_id)
 
     def test_actor_id_is_kept_as_a_decimal_string(self):
@@ -214,15 +208,12 @@ class OidcVerifierTests(unittest.TestCase):
                 identity = self.verifier.verify(self._token(self._claims(actor_id=actor_id)))
                 self.assertEqual(identity.actor_id, actor_id)
 
-    def test_absent_actor_id_stays_none_without_affecting_the_run_identity(self):
+    def test_absent_actor_id_is_rejected(self):
         claims = self._claims()
         del claims["actor_id"]
 
-        identity = self.verifier.verify(self._token(claims))
-
-        self.assertIsNone(identity.actor_id)
-        self.assertEqual(identity.actor, "synthetic-actor")
-        self.assertEqual((identity.run_id, identity.run_attempt), ("1234567890", 1))
+        with self.assertRaisesRegex(OidcVerificationError, "OIDC token verification failed"):
+            self.verifier.verify(self._token(claims))
 
     def test_rejects_malformed_actor_id_without_echoing_it(self):
         invalid = (
@@ -249,7 +240,7 @@ class OidcVerifierTests(unittest.TestCase):
         )
         for actor_id in invalid:
             with self.subTest(actor_id=actor_id):
-                with self.assertRaisesRegex(OidcVerificationError, "actor ID is malformed") as context:
+                with self.assertRaises(OidcVerificationError) as context:
                     self.verifier.verify(self._token(self._claims(actor_id=actor_id)))
                 if isinstance(actor_id, str) and actor_id.strip():
                     self.assertNotIn(actor_id.strip(), str(context.exception))
@@ -262,9 +253,8 @@ class OidcVerifierTests(unittest.TestCase):
 
         claims = self._claims(actor="12")
         del claims["actor_id"]
-        numeric_login = self.verifier.verify(self._token(claims))
-        self.assertEqual(numeric_login.actor, "12")
-        self.assertIsNone(numeric_login.actor_id)
+        with self.assertRaises(OidcVerificationError):
+            self.verifier.verify(self._token(claims))
 
         claims = self._claims()
         del claims["actor"]

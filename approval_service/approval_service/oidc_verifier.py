@@ -34,6 +34,7 @@ _REQUIRED_CLAIMS = (
     "sha",
     "run_id",
     "run_attempt",
+    "actor_id",
 )
 _ALLOWED_ALGORITHMS = ("RS256",)
 _CLOCK_SKEW_SECONDS = 30
@@ -98,8 +99,8 @@ class OidcPolicy:
 class VerifiedRunIdentity:
     """Minimal, verified claims safe to pass to the request layer.
 
-    ``actor_id`` is the stable account ID of the run initiator when the token
-    carries it; ``actor`` is a renamable login kept for display only and never
+    ``actor_id`` is the required stable account ID of the run initiator;
+    ``actor`` is an optional, renamable login kept for display only and never
     used as an identity. Neither links the run to a WebAuthn approver, and G1
     D-5 remains unresolved.
     """
@@ -113,7 +114,7 @@ class VerifiedRunIdentity:
     run_id: str
     run_attempt: int
     actor: str | None
-    actor_id: str | None
+    actor_id: str
     token_id: str | None
 
 
@@ -206,17 +207,16 @@ class OidcVerifier:
             type(actor) is not str or not actor or actor.strip() != actor
         ):
             raise OidcVerificationError("OIDC actor is malformed")
-        # GitHub documents `actor_id` as the ID of the personal account that
-        # initiated the run; its official example is a string such as "12".
-        # Accepting only a positive decimal string without a leading zero is
-        # this module's assumption. Neither that representation nor the
-        # claim's presence in a real token is confirmed, so it stays optional;
-        # once present, any other value (null included) is refused.
-        actor_id = None
-        if "actor_id" in claims:
-            actor_id = claims["actor_id"]
-            if type(actor_id) is not str or _DECIMAL.fullmatch(actor_id) is None:
-                raise OidcVerificationError("OIDC actor ID is malformed")
+        # GitHub documents `actor_id` as the personal-account ID that
+        # initiated the run. It is mandatory by the owner's decision of
+        # 24 October 2026: an absent claim is already refused by the
+        # required-claims validation above, and any value that is not a
+        # positive decimal string is refused here. Its presence and form in
+        # a real token remain unconfirmed. The mutable `actor` login is
+        # display-only.
+        actor_id = claims.get("actor_id")
+        if type(actor_id) is not str or _DECIMAL.fullmatch(actor_id) is None:
+            raise OidcVerificationError("OIDC actor ID is malformed")
         token_id = claims.get("jti")
         if token_id is not None and (type(token_id) is not str or not token_id or token_id.strip() != token_id):
             raise OidcVerificationError("OIDC token identifier is malformed")
