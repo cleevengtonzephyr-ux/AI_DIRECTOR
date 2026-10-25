@@ -12,7 +12,7 @@ Préparer l’inscription de l’approbatrice B désignée le 23 octobre 2026, e
 2. **Invitation à usage unique.** L’invitation est liée à un identifiant d’approbateur et à un principal prédéfinis. Elle contient un secret aléatoire, n’est utilisable qu’une fois et expire rapidement. La base ne conserve que son empreinte ; le secret n’est montré qu’à sa création et remis à B par un canal choisi à part. La durée exacte et le canal restent à décider.
 3. **Preuve de contrôle du compte GitHub (choix de conception du 24 octobre 2026).** B autorise, avec son propre compte, une GitHub App sans permission et non installée, par le flux Web. L’ID obtenu avec `GET /user` doit être égal à l’ID attendu, communiqué par un canal séparé (voir la section « Décision du propriétaire (24 octobre 2026) »). B ne lance aucun workflow et n’obtient aucun droit d’écriture. Cela prouve au mieux le contrôle de ce compte à un instant donné ; pas l’identité civile de B ni la séparation de deux personnes. Le dépôt AI_DIRECTOR est public : B peut lire et examiner le code sans invitation ni droit d’écriture. La revue du dépôt ne vaut pas liaison de son compte à son identité d’approbatrice.
 4. **Inscription WebAuthn.** B utilise l’invitation pour inscrire un premier identifiant avec vérification locale (UV). Une cérémonie séparée inscrit un second identifiant sur un authentificateur distinct, destiné au secours. Les règles D-3 et D-4 (BE/BS, UV, RP ID et origine exacts) sont appliquées. La première UV ne remplace pas l’invitation et ne sert pas à autoriser sa propre inscription.
-5. **Liaison du compte et séparation au moment d’une demande.** L’inscription par invitation du prototype v4 n’établit aucune liaison avec un compte GitHub et ne compare pas B à l’acteur d’un run. La preuve de contrôle du compte suit le parcours décidé le 24 octobre 2026 ; l’état d’attente, la confirmation par l’administrateur et la trace distincte de la preuve restent à concevoir. Lors d’une future demande, le service devra comparer le `actor_id` vérifié au compte lié à l’approbateur et refuser si les deux appartiennent au même principal. Cette comparaison ne prouve pas à elle seule que deux personnes distinctes interviennent.
+5. **Liaison du compte et séparation au moment d’une demande.** Le prototype v5 enregistre l’ID de compte attendu dans l’invitation, mais ne crée aucune liaison active avec un compte GitHub et ne compare pas B à l’acteur d’un run. La preuve de contrôle du compte suit le parcours décidé le 24 octobre 2026 ; l’état d’attente, la confirmation par l’administrateur et la trace distincte de la preuve restent à concevoir. Lors d’une future demande, le service devra comparer le `actor_id` vérifié au compte lié à l’approbateur et refuser si les deux appartiennent au même principal. Cette comparaison ne prouve pas à elle seule que deux personnes distinctes interviennent.
 6. **Maintien du refus fermé.** Tant que les contrôles précédents, la preuve de séparation humaine et la vérification des protections GitHub ne sont pas établis, aucune approbation ne peut être consommée et Provider = CLOSED, NO-GO restent inchangés.
 
 ## Décision du propriétaire (24 octobre 2026) : preuve de contrôle du compte GitHub de B
@@ -38,7 +38,7 @@ Le propriétaire a accepté le 24 octobre 2026 les choix de conception ci-dessou
 6. B inscrit son identifiant WebAuthn avec UV, selon D-2 à D-4. L’invitation est consommée et l’inscription est enregistrée en attente.
 7. Le propriétaire confirme l’inscription par SSH ; elle ne devient active qu’à ce moment.
 
-**Écart avec le stockage v4 actuel.** Le prototype v4 active le principal et l’approbateur dès la consommation de l’invitation, dans la même transaction, et ne crée aucune liaison de compte GitHub ; la colonne `github_accounts.evidence` n’accepte aujourd’hui que `ADMIN_ATTESTED`. Avant toute implémentation de ce parcours, il faudra concevoir un état d’attente jusqu’à la confirmation SSH, ainsi que l’enregistrement distinct de la preuve de compte GitHub. Cette décision ne modifiait pas le code du stockage. Le deuxième incrément de code (schéma v5, section « Deuxième incrément de code » ci-dessous) ajoute ensuite cet état d’attente dans un prototype mock-only, sans modifier v4.
+**Écart avec le stockage v4 (constat du 24 octobre 2026).** Le prototype v4 active le principal et l’approbateur dès la consommation de l’invitation, dans la même transaction, et ne crée aucune liaison de compte GitHub ; la colonne `github_accounts.evidence` n’accepte aujourd’hui que `ADMIN_ATTESTED`. Avant toute implémentation de ce parcours, il faudra concevoir un état d’attente jusqu’à la confirmation SSH, ainsi que l’enregistrement distinct de la preuve de compte GitHub. Cette décision ne modifiait pas le code du stockage. Le deuxième incrément de code (schéma v5, section « Deuxième incrément de code » ci-dessous) ajoute ensuite cet état d’attente dans un prototype mock-only. Le prototype v4 a ensuite été retiré du PR #62 (section « Retrait du prototype v4 ») ; v5 est le seul prototype d’inscription conservé.
 
 **Points qui restent ouverts**
 
@@ -60,6 +60,8 @@ Le propriétaire a accepté le 24 octobre 2026 les choix de conception ci-dessou
 - [OpenID Connect reference](https://docs.github.com/en/actions/reference/security/oidc) : définition de `actor_id`.
 
 ## Contrat de stockage v4 (mock-only)
+
+> **Contrat historique.** Il a guidé le prototype v4, retiré du PR #62 le 24 octobre 2026 (section « Retrait du prototype v4 »). Son exigence d’activer les lignes de registre à la consommation est remplacée par la décision du 24 octobre 2026 : l’inscription reste en attente jusqu’à la confirmation du propriétaire par SSH. Les règles d’invitation ci-dessous (secret de 256 bits dont seule l’empreinte est conservée, états terminaux, refus indiscernable, transaction `BEGIN IMMEDIATE`) sont reprises par le schéma v5.
 
 - Le stockage actuel de G2 est strictement validé en version 3 : toute table supplémentaire ou toute version différente est refusée, et aucune migration n’existe. Ajouter les invitations au même registre nécessite donc un schéma version 4, créé uniquement dans un nouveau fichier ; une base existante ne sera ni modifiée ni migrée automatiquement.
 - Une invitation doit être créée avec un secret cryptographiquement aléatoire d’au moins 256 bits, lié à un `approver_id` et un `principal_id` immuables. La primitive retourne le secret au processus appelant une seule fois ; le registre ne conserve que son empreinte SHA-256. La remise à B par un administrateur authentifié relève d’une étape distincte.
@@ -87,7 +89,9 @@ Le propriétaire a accepté le 24 octobre 2026 les choix de conception ci-dessou
 - Comment la possession d’un second authentificateur séparé sera-t-elle vérifiée et son usage de secours protégé ?
 - La présence et la forme de actor_id dans un vrai jeton OIDC restent à vérifier séparément ; aucun jeton réel n’est autorisé par la désignation actuelle.
 
-## Premier incrément de code — prototype mock-only (24 octobre 2026)
+## Premier incrément de code — prototype v4 mock-only (24 octobre 2026, retiré)
+
+> **Retiré du PR #62 le 24 octobre 2026.** Le module `approval_store_v4.py`, ses tests et leur intégration à la CI ne font plus partie du changement proposé (section « Retrait du prototype v4 »). Le compte rendu ci-dessous est conservé comme historique ; il ne décrit plus le contenu du PR.
 
 Le module `approval_service/approval_service/approval_store_v4.py` ajoute une variante fraîche du stockage en schéma 4. Le stockage v3 reste inchangé et refuse les bases v4. Le nouveau module n’effectue aucune migration : `initialize` refuse tout fichier existant, et l’ouverture n’accepte qu’un fichier dont les objets sont exactement ceux du schéma 4 ; une base v3 est donc refusée. Il permet de créer une invitation liée à un `approver_id` et un `principal_id`, d’en consommer le secret une seule fois pour activer ces deux lignes dans la même transaction, de la révoquer ou de marquer les invitations expirées. Seule l’empreinte SHA-256 du secret est conservée. L’appelant fournit l’instant absolu d’expiration ; aucune durée n’est choisie ici.
 
@@ -125,11 +129,11 @@ Le job `posix-approval-store` lance maintenant les suites v3 et v4 sous Ubuntu, 
 
 ## Deuxième incrément de code — inscription en attente, schéma v5 mock-only (24 octobre 2026)
 
-Le module `approval_service/approval_service/approval_store_v5.py` ajoute un schéma 5 frais. Il reprend le schéma 3 à l’identique et lui ajoute deux tables : `enrollment_invitations` et `pending_enrollments`. Le schéma 4 et son module ne sont pas modifiés. Aucune migration n’existe : `initialize` refuse tout fichier existant (v3, v4, v5 ou vide) sans le modifier, et chacune des trois versions refuse d’ouvrir les fichiers des deux autres.
+Le module `approval_service/approval_service/approval_store_v5.py` ajoute un schéma 5 frais. Il reprend le schéma 3 à l’identique et lui ajoute deux tables : `enrollment_invitations` et `pending_enrollments`. Le stockage v3 n’est pas modifié. Aucune migration n’existe : `initialize` refuse tout fichier existant (v3, de version 4, v5 ou vide) sans le modifier ; v5 refuse d’ouvrir un fichier v3 ou de version 4, et v3 refuse un fichier v5.
 
 **Fonctionnement**
 
-- **Invitation.** `create_invitation` lie l’invitation à un `approver_id`, à un `principal_id` et à l’ID numérique attendu du compte GitHub de B (`expected_account_id`). Elle est refusée si l’une de ces valeurs est déjà enregistrée, déjà invitée ou déjà en attente. Comme en v4, seule l’empreinte SHA-256 du secret est stockée.
+- **Invitation.** `create_invitation` lie l’invitation à un `approver_id`, à un `principal_id` et à l’ID numérique attendu du compte GitHub de B (`expected_account_id`). Elle est refusée si l’une de ces valeurs est déjà enregistrée, déjà invitée ou déjà en attente. Seule l’empreinte SHA-256 du secret est stockée.
 - **Consommation.** `consume_invitation` reçoit le secret, un ID de compte fourni par l’appelant et les champs du credential WebAuthn. Si l’ID diffère de l’ID attendu, rien n’est écrit et l’invitation reste ouverte. Sinon, dans une seule transaction `BEGIN IMMEDIATE`, l’invitation passe à `CONSUMED` et une inscription `PENDING` est créée avec le credential et le contrôle `MOCK_UNVERIFIED_ACCOUNT_ID_MATCH`.
 - **Aucune activation.** Aucune frontière SSH authentifiée n’existe ; le schéma v5 n’a donc ni primitive de confirmation ni état `CONFIRMED`. Une inscription ne peut que rester `PENDING` ou être clôturée `REJECTED` par `reject_enrollment`, sans rien activer ; `REJECTED` est définitif. Le module n’écrit jamais de ligne de principal, d’approbateur, de compte GitHub ou de credential : les opérations héritées de v3 ne voient aucune inscription.
 - **Aucune expiration.** Une inscription en attente n’a pas de délai d’expiration et `expire_invitations` ne la modifie pas. Sa durée reste à décider.
@@ -148,7 +152,7 @@ Le module `approval_service/approval_service/approval_store_v5.py` ajoute un sch
 
 **Validation locale (24 octobre 2026).** `tests/test_g2_approval_store_v5.py` contient 27 tests synthétiques. Ils utilisent des bases temporaires, des ID de compte fictifs et des credentials construits à partir de clés EC générées localement. Ils vérifient :
 
-- un schéma 5 créé seulement dans un nouveau fichier ; les fichiers v3, v4, v5 ou vides existants restent identiques octet pour octet, et les trois versions se refusent mutuellement ;
+- un schéma 5 créé seulement dans un nouveau fichier ; les fichiers existants (v3, de version 4, v5 ou vides) restent identiques octet pour octet ; v5 refuse les fichiers v3 et de version 4, et v3 refuse les fichiers v5 ;
 - la consommation vers l’état `PENDING`, sans aucune ligne de registre ou de credential, et le refus sans écriture d’un ID de compte différent ou d’un credential mal formé, déjà inscrit ou déjà en attente ;
 - un retour arrière complet si l’écriture de l’inscription échoue après le passage de l’invitation à `CONSUMED` ;
 - l’absence de toute primitive ou de tout état de confirmation, et l’absence de toute ligne `github_accounts`, `ADMIN_ATTESTED` ou non, après consommation, rejet, révocation et expiration ;
@@ -159,14 +163,33 @@ Le module `approval_service/approval_service/approval_store_v5.py` ajoute un sch
 
 Huit mutations temporaires, appliquées à une copie hors du dépôt, ont toutes été détectées : activation dès la consommation, comparaison de l’ID supprimée, contrôle réétiqueté en preuve GitHub, état `CONFIRMED` admis, expiration des inscriptions en attente, déclencheur de création neutralisé, primitive de confirmation rétablie avec une ligne `ADMIN_ATTESTED`, et échec d’écriture ignoré après le passage à `CONSUMED`.
 
-Résultats sous Windows, Python 3.14.5, avec les dépendances verrouillées installées dans un dossier temporaire hors du dépôt :
+Résultats sous Windows, Python 3.14.5, avec les dépendances verrouillées installées dans un dossier temporaire hors du dépôt, avant le retrait de v4 :
 
 - tests ciblés : 27 tests OK ;
 - tests G2 : 224 tests OK (2 ignorés) ;
 - suite complète : 3216 tests OK (2 ignorés) ;
 - audit d’architecture : `NO_DRIFT`.
 
-Le job `posix-approval-store` lance aussi la suite v5 sous Ubuntu. Le comportement Linux de cette version corrigée ne sera confirmé qu’après le prochain passage de ce job. D-5 reste non résolu ; Provider = CLOSED et NO-GO restent en vigueur.
+Le job `posix-approval-store` lance les suites v3 et v5 sous Ubuntu. Le comportement Linux de cette version corrigée ne sera confirmé qu’après le prochain passage de ce job. D-5 reste non résolu ; Provider = CLOSED et NO-GO restent en vigueur.
+
+## Retrait du prototype v4 (24 octobre 2026)
+
+Le prototype v4 activait le principal et l’approbateur dès la consommation d’une invitation, par une primitive non authentifiée. Cela contredit la décision du 24 octobre 2026 : l’inscription doit rester en attente jusqu’à une confirmation du propriétaire par SSH. Il est donc retiré du contenu final du PR #62 (option (a) de l’analyse de la frontière SSH).
+
+- **Retirés :** `approval_service/approval_service/approval_store_v4.py`, `tests/test_g2_approval_store_v4.py`, et la suite v4 du job CI `posix-approval-store` ; le test de contrat CI est adapté.
+- **Adaptés :** les tests v5 qui vérifiaient le refus mutuel avec v4 utilisent désormais un fichier v3 étiqueté en version 4 ; ils vérifient toujours qu’un tel fichier n’est ni réutilisé ni modifié.
+- **Inchangés :** le stockage v3, son comportement et ses tests. L’historique Git n’est pas réécrit : les commits qui avaient ajouté v4 restent dans la branche.
+- **Seul prototype conservé : v5.** Une invitation consommée crée une inscription `PENDING`, qui peut seulement rester en attente ou être rejetée (`REJECTED`) ; aucune ligne n’est activée.
+
+Résultats après le retrait, sous Windows, Python 3.14.5, avec les dépendances verrouillées installées dans un dossier temporaire hors du dépôt :
+
+- tests v5 : 27 tests OK ; tests v3 : 74 tests OK (2 ignorés) ;
+- tests du contrat CI (`test_phase_f_production_path.py`) : 63 tests OK ;
+- tests G2 : 192 tests OK (2 ignorés) ;
+- suite complète : 3184 tests OK (2 ignorés), soit les 32 tests v4 en moins ;
+- audit d’architecture : `NO_DRIFT`.
+
+Aucune confirmation SSH, cérémonie WebAuthn réelle, GitHub App, OAuth, callback public, compte, secret ni Provider n’est ajouté. D-5 reste non résolu ; Provider = CLOSED et NO-GO restent en vigueur.
 
 ## Limites
 

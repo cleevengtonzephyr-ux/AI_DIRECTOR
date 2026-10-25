@@ -30,7 +30,6 @@ from fido2.cose import ES256
 from fido2.webauthn import Aaguid, AttestedCredentialData
 
 import approval_service.approval_store as v3_module
-import approval_service.approval_store_v4 as v4_module
 import approval_service.approval_store_v5 as v5_module
 from approval_service.approval_store import (
     ApprovalRefusedError,
@@ -38,7 +37,6 @@ from approval_service.approval_store import (
     ApprovalStoreError,
     ApprovalStoreUnavailableError,
 )
-from approval_service.approval_store_v4 import ApprovalStoreV4
 from approval_service.approval_store_v5 import (
     ACCOUNT_CHECK,
     ApprovalStoreV5,
@@ -129,6 +127,18 @@ class _V5TestCase(unittest.TestCase):
         rows = self._rows("SELECT state FROM pending_enrollments WHERE invitation_id = ?", (invitation_id,))
         return rows[0][0] if rows else None
 
+    def _other_version_file(self, name, version):
+        """A valid v3 file relabelled with another schema version, e.g. 4."""
+
+        path = self.sandbox / name
+        ApprovalStore.initialize(path, self.clock)
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(f"PRAGMA user_version = {version}")
+        finally:
+            connection.close()
+        return path
+
     def _issue(self, approver_id=APPROVER_ID, principal_id=PRINCIPAL_ID, account_id=ACCOUNT_ID,
                expires_at_ms=EXPIRES_AT):
         return self.store.create_invitation(approver_id, principal_id, account_id, expires_at_ms=expires_at_ms)
@@ -148,17 +158,16 @@ class _V5TestCase(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
-# Fresh-file schema v5; v3 and v4 files are never touched
+# Fresh-file schema v5; files of other versions are never touched
 # ----------------------------------------------------------------------
 
 
 class TestSchemaV5(_V5TestCase):
     def test_schema_v5_extends_v3_with_the_enrollment_tables_only(self):
-        self.assertEqual((v3_module.SCHEMA_VERSION, v4_module.SCHEMA_VERSION, v5_module.SCHEMA_VERSION), (3, 4, 5))
+        self.assertEqual((v3_module.SCHEMA_VERSION, v5_module.SCHEMA_VERSION), (3, 5))
         self.assertEqual(v5_module.APPLICATION_ID, v3_module.APPLICATION_ID)
         self.assertEqual(v5_module._SCHEMA[: len(v3_module._SCHEMA)], v3_module._SCHEMA)
         self.assertEqual(v5_module._SCHEMA[len(v3_module._SCHEMA):], v5_module._ENROLLMENT_SCHEMA)
-        self.assertNotEqual(v5_module._SCHEMA, v4_module._SCHEMA)
         self.assertEqual(self._rows("PRAGMA user_version"), [(5,)])
         self.assertEqual(self._rows("PRAGMA journal_mode"), [("wal",)])
         tables = {name for (name,) in self._rows("SELECT name FROM sqlite_schema WHERE type = 'table'")}
@@ -166,9 +175,8 @@ class TestSchemaV5(_V5TestCase):
 
     def test_initialize_never_reuses_an_existing_v3_v4_v5_or_empty_file(self):
         v3_path = self.sandbox / "existing-v3.sqlite3"
-        v4_path = self.sandbox / "existing-v4.sqlite3"
         ApprovalStore.initialize(v3_path, self.clock)
-        ApprovalStoreV4.initialize(v4_path, self.clock)
+        v4_path = self._other_version_file("existing-v4.sqlite3", 4)
         empty_path = self.sandbox / "empty.sqlite3"
         empty_path.write_bytes(b"")
         for path in (self.db_path, v3_path, v4_path, empty_path):
@@ -189,13 +197,10 @@ class TestSchemaV5(_V5TestCase):
                     ApprovalStoreV5.initialize(path, self.clock)
                 self.assertFalse(path.exists())
 
-    def test_v3_v4_and_v5_refuse_each_other_without_changing_any_file(self):
+    def test_v5_refuses_v3_and_version_4_files_and_v3_refuses_v5_without_changing_any_file(self):
         v3_path = self.sandbox / "v3.sqlite3"
-        v4_path = self.sandbox / "v4.sqlite3"
         ApprovalStore.initialize(v3_path, self.clock)
-        ApprovalStoreV4.initialize(v4_path, self.clock).create_invitation(
-            APPROVER_ID, PRINCIPAL_ID, expires_at_ms=EXPIRES_AT
-        )
+        v4_path = self._other_version_file("v4.sqlite3", 4)
         before = {path: path.read_bytes() for path in (v3_path, v4_path)}
         for path, version in ((v3_path, 3), (v4_path, 4)):
             with self.subTest(opened=path.name):
@@ -204,14 +209,9 @@ class TestSchemaV5(_V5TestCase):
                 ):
                     ApprovalStoreV5(path, self.clock)
                 self.assertEqual(self._rows("PRAGMA user_version", db_path=path), [(version,)])
-        for store_class, version in ((ApprovalStore, 3), (ApprovalStoreV4, 4)):
-            with self.subTest(opener=store_class.__name__):
-                with self.assertRaisesRegex(
-                    ApprovalStoreUnavailableError, f"user_version is not the value of schema version {version}"
-                ):
-                    store_class(self.db_path, self.clock)
+        with self.assertRaisesRegex(ApprovalStoreUnavailableError, "user_version is not the value of schema version 3"):
+            ApprovalStore(self.db_path, self.clock)
         self.assertEqual({path: path.read_bytes() for path in (v3_path, v4_path)}, before)
-        self.assertEqual(self._rows("SELECT state FROM enrollment_invitations", db_path=v4_path), [("ISSUED",)])
         self.assertEqual(self._rows("PRAGMA user_version"), [(5,)])
 
     def test_a_v5_file_whose_objects_differ_is_refused(self):
@@ -563,7 +563,7 @@ class TestScopeBoundaries(unittest.TestCase):
             v5_public - v3_public,
             {"create_invitation", "consume_invitation", "reject_enrollment", "revoke_invitation", "expire_invitations"},
         )
-        self.assertFalse(issubclass(ApprovalStoreV5, ApprovalStoreV4))
+        self.assertEqual(ApprovalStoreV5.__bases__, (ApprovalStore,))
 
     def test_the_module_imports_no_network_oauth_endpoint_or_provider_code(self):
         tree = ast.parse(self.SOURCE)

@@ -1008,8 +1008,8 @@ class TestPinnedActions(unittest.TestCase):
         # Phase G2 : registre d'approbation SQLite sous POSIX (verrous fcntl,
         # mémoire partagée WAL, permissions). Dépendances verrouillées avec
         # empreintes dans le Python système, jamais via `uv run`/`uv sync`.
-        # Les schémas v4 et v5 mock-only (invitations et inscriptions en
-        # attente D-5) y sont testés avec le v3.
+        # Le schéma v5 mock-only (inscriptions en attente D-5) y est testé
+        # avec le v3.
         ci = parse_workflow_yaml(CI_WORKFLOW.read_text(encoding="utf-8"))
         self.assertEqual(set(ci["jobs"]), {"dependency-preflight", "posix-execution-claim", "posix-approval-store", "tests"})
         job = ci["jobs"]["posix-approval-store"]
@@ -1024,8 +1024,7 @@ class TestPinnedActions(unittest.TestCase):
                 '--format requirements.txt --output-file "$RUNNER_TEMP/approval-requirements.txt"\n'
                 'python -m pip install --disable-pip-version-check --require-hashes --no-deps '
                 '-r "$RUNNER_TEMP/approval-requirements.txt"\n',
-                "python -m unittest tests.test_g2_approval_store tests.test_g2_approval_store_v4"
-                " tests.test_g2_approval_store_v5 -v",
+                "python -m unittest tests.test_g2_approval_store tests.test_g2_approval_store_v5 -v",
             ],
         )
         self.assertNotIn("shell", job["steps"][3])

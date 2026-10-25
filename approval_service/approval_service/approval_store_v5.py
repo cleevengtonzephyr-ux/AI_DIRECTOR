@@ -1,10 +1,10 @@
 """Mock-only G2 approval store schema v5: enrollments that stay pending.
 
-This is a fresh-file schema. It does not migrate or modify schema v3 or v4:
-both stores keep rejecting a v5 database, ``initialize`` never reuses an
-existing file, and opening accepts only a file whose objects are exactly
-those of schema v5. The inherited approval-request operations use the same
-immutable v3 contract plus two enrollment tables.
+This is a fresh-file schema. It does not migrate or modify a file of schema
+v3 or of any other version: the v3 store keeps rejecting a v5 database,
+``initialize`` never reuses an existing file, and opening accepts only a file
+whose objects are exactly those of schema v5. The inherited approval-request
+operations use the same immutable v3 contract plus two enrollment tables.
 
 Consuming an invitation only records a PENDING enrollment. No principal,
 approver, GitHub account or credential row is ever written by this module:
