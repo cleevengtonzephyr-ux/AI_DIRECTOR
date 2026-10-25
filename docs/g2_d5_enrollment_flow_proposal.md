@@ -1,6 +1,6 @@
 # G2 D-5 — proposition de parcours d’inscription (brouillon)
 
-> **Statut : frontière des rôles confirmée par le propriétaire le 23 octobre 2026 ; parcours technique encore à examiner.** Ce document ne crée aucun compte, aucune invitation, aucun credential ni aucune preuve de séparation. Il n’autorise ni consommation d’approbation, ni Provider, ni déploiement.
+> **Statut : frontière des rôles confirmée par le propriétaire le 23 octobre 2026 ; choix de conception de la preuve de compte GitHub acceptés le 24 octobre 2026 ; parcours technique encore à concevoir.** Ce document ne crée aucun compte, aucune invitation, aucun credential, aucune GitHub App ni aucune preuve de séparation. Il n’autorise ni consommation d’approbation, ni Provider, ni déploiement.
 
 ## But
 
@@ -10,10 +10,54 @@ Préparer l’inscription de l’approbatrice B désignée le 23 octobre 2026, e
 
 1. **Frontière des rôles décidée.** Le propriétaire administre seul le registre par le mécanisme SSH d’administration prévu par D-2. B est approbatrice uniquement : elle ne crée ni ne révoque de comptes, d’approbateurs, de credentials ou d’invitations. Aucun endpoint web d’administration n’est exposé. La configuration effective du compte SSH autorisé, son contrôle d’accès et sa journalisation restent à concevoir et à vérifier.
 2. **Invitation à usage unique.** L’invitation est liée à un identifiant d’approbateur et à un principal prédéfinis. Elle contient un secret aléatoire, n’est utilisable qu’une fois et expire rapidement. La base ne conserve que son empreinte ; le secret n’est montré qu’à sa création et remis à B par un canal choisi à part. La durée exacte et le canal restent à décider.
-3. **Preuve de contrôle du compte GitHub (option à confirmer).** Une piste est que B lance elle-même un workflow dédié et que le vérificateur contrôle un jeton OIDC limité au dépôt et au workflow choisis, puis récupère l’identifiant numérique signé du compte (`actor_id`). Cela prouverait au mieux le contrôle de ce compte pendant ce run ; pas l’identité civile de B ni, à lui seul, la séparation de deux personnes. Le dépôt AI_DIRECTOR est public : B peut lire et examiner le code sans invitation ni droit d’écriture. La revue du dépôt ne vaut pas liaison de son compte à son identité d’approbatrice. Si la preuve P-1 exige que B lance un workflow, les permissions GitHub nécessaires restent à établir séparément ; aucun droit d’écriture ne lui est attribué par la présente décision. Le workflow, ses permissions et les protections du dépôt restent à spécifier selon D-15.
+3. **Preuve de contrôle du compte GitHub (choix de conception du 24 octobre 2026).** B autorise, avec son propre compte, une GitHub App sans permission et non installée, par le flux Web. L’ID obtenu avec `GET /user` doit être égal à l’ID attendu, communiqué par un canal séparé (voir la section « Décision du propriétaire (24 octobre 2026) »). B ne lance aucun workflow et n’obtient aucun droit d’écriture. Cela prouve au mieux le contrôle de ce compte à un instant donné ; pas l’identité civile de B ni la séparation de deux personnes. Le dépôt AI_DIRECTOR est public : B peut lire et examiner le code sans invitation ni droit d’écriture. La revue du dépôt ne vaut pas liaison de son compte à son identité d’approbatrice.
 4. **Inscription WebAuthn.** B utilise l’invitation pour inscrire un premier identifiant avec vérification locale (UV). Une cérémonie séparée inscrit un second identifiant sur un authentificateur distinct, destiné au secours. Les règles D-3 et D-4 (BE/BS, UV, RP ID et origine exacts) sont appliquées. La première UV ne remplace pas l’invitation et ne sert pas à autoriser sa propre inscription.
-5. **Liaison du compte et séparation au moment d’une demande.** L’inscription par invitation n’établit aucune liaison avec un compte GitHub et ne compare pas B à l’acteur d’un run. Une preuve de contrôle du compte, sa liaison au principal par l’administrateur et la trace de cette attestation restent à décider. Lors d’une future demande, le service devra comparer le `actor_id` vérifié au compte lié à l’approbateur et refuser si les deux appartiennent au même principal. Cette comparaison ne prouve pas à elle seule que deux personnes distinctes interviennent.
+5. **Liaison du compte et séparation au moment d’une demande.** L’inscription par invitation du prototype v4 n’établit aucune liaison avec un compte GitHub et ne compare pas B à l’acteur d’un run. La preuve de contrôle du compte suit le parcours décidé le 24 octobre 2026 ; l’état d’attente, la confirmation par l’administrateur et la trace distincte de la preuve restent à concevoir. Lors d’une future demande, le service devra comparer le `actor_id` vérifié au compte lié à l’approbateur et refuser si les deux appartiennent au même principal. Cette comparaison ne prouve pas à elle seule que deux personnes distinctes interviennent.
 6. **Maintien du refus fermé.** Tant que les contrôles précédents, la preuve de séparation humaine et la vérification des protections GitHub ne sont pas établis, aucune approbation ne peut être consommée et Provider = CLOSED, NO-GO restent inchangés.
+
+## Décision du propriétaire (24 octobre 2026) : preuve de contrôle du compte GitHub de B
+
+Le propriétaire a accepté le 24 octobre 2026 les choix de conception ci-dessous. Ce sont des choix de conception seulement : aucune GitHub App, aucun secret, aucun jeton ni aucun compte n’est créé, et rien n’est déployé. D-5 reste non résolu ; Provider = CLOSED et NO-GO restent en vigueur.
+
+**Choix retenus**
+
+- **GitHub App sans permission, non installée, flux Web seulement.** L’application ne demande aucune permission et n’est installée sur aucun compte ni dépôt ; elle sert uniquement à ce que B l’autorise avec son propre compte GitHub. Le flux Web utilise PKCE `S256`, un `state` aléatoire lié à la session d’inscription et une URI de callback exacte, sans correspondance générique. Le Device Flow est désactivé. B n’obtient aucun accès Write et ne lance aucun workflow dans le dépôt : la piste d’un workflow lancé par B, envisagée jusqu’ici pour cette preuve, n’est pas retenue.
+- **ID attendu communiqué à part.** L’ID numérique du compte GitHub de B est communiqué au propriétaire par un canal séparé, avant l’inscription. L’ID obtenu avec `GET /user`, au moyen du jeton issu de cet échange, doit lui être égal ; sinon l’inscription est refusée. Le login n’intervient jamais dans cette comparaison.
+- **Inscription en attente.** L’inscription reste en attente jusqu’à la confirmation du propriétaire par SSH. Aucune ligne n’est active avant cette confirmation.
+- **Preuve distincte de `ADMIN_ATTESTED`.** La preuve de contrôle du compte GitHub est enregistrée séparément de l’attestation administrative `ADMIN_ATTESTED` ; l’une ne remplace pas l’autre.
+- **Aucun login ni jeton conservé.** Ni le login ni aucun jeton OAuth (jeton d’accès ou de rafraîchissement) n’est conservé. Le grant de B est révoqué dès que l’ID est lu.
+- **Secret client.** La GitHub App possède un secret client. Il reste à protéger et à gérer selon une décision D-15 encore ouverte.
+
+**Parcours visé (non implémenté)**
+
+1. Le propriétaire crée par SSH une invitation et y associe l’ID attendu de B, reçu par un canal séparé.
+2. B ouvre le service et présente le secret de l’invitation. Le service ouvre une session d’inscription sans consommer l’invitation.
+3. Le service redirige B vers GitHub avec le `state` et le défi PKCE `S256` ; B se connecte avec son compte et autorise l’application.
+4. Au retour sur l’URI de callback exacte, le service vérifie le `state`, échange le code avec le vérificateur PKCE et lit l’ID avec `GET /user`.
+5. Le service compare cet ID à l’ID attendu, révoque le grant et ne conserve pas le jeton.
+6. B inscrit son identifiant WebAuthn avec UV, selon D-2 à D-4. L’invitation est consommée et l’inscription est enregistrée en attente.
+7. Le propriétaire confirme l’inscription par SSH ; elle ne devient active qu’à ce moment.
+
+**Écart avec le stockage v4 actuel.** Le prototype v4 active le principal et l’approbateur dès la consommation de l’invitation, dans la même transaction, et ne crée aucune liaison de compte GitHub ; la colonne `github_accounts.evidence` n’accepte aujourd’hui que `ADMIN_ATTESTED`. Avant toute implémentation de ce parcours, il faudra concevoir un état d’attente jusqu’à la confirmation SSH, ainsi que l’enregistrement distinct de la preuve de compte GitHub. Le code du stockage n’est pas modifié dans cette étape.
+
+**Points qui restent ouverts**
+
+- **H1.** L’équivalence entre l’ID REST renvoyé par `GET /user` et le claim `actor_id` du jeton OIDC n’est pas prouvée. La documentation GitHub décrit les deux comme l’identifiant du compte, sans les déclarer identiques. Aucun essai avec un jeton OIDC réel n’est autorisé.
+- **D-12.** L’URI de callback est une interface publique : aucun callback public ne doit être déployé avant une décision séparée.
+- **Secret client (D-15).** Son stockage et sa rotation restent à décider.
+- **Portée de la preuve.** Ce mécanisme prouve le contrôle d’un compte GitHub à un instant donné. Il ne prouve ni l’identité civile de B ni la séparation de deux personnes.
+- **À vérifier avant l’enregistrement de l’application :** que B peut autoriser l’application selon la visibilité choisie, et que la révocation du grant invalide aussi le jeton de rafraîchissement. Le comportement en cas d’échec de la révocation reste à spécifier.
+- **Non tranchés :** la liaison du compte GitHub du propriétaire à son principal, la conduite à tenir si le compte de B change ou est compromis, et la protection du compte GitHub de B, que ce mécanisme ne permet pas de vérifier.
+
+**Références (documentation officielle GitHub, consultée le 24 octobre 2026)**
+
+- [Generating a user access token for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app) : flux Web, `state`, PKCE `S256`, expiration des jetons.
+- [Authorizing OAuth apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps) : URI de callback exacte, risque de la correspondance générique, Device Flow.
+- [Authenticating with a GitHub App on behalf of a user](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-with-a-github-app-on-behalf-of-a-user) : autorisation possible sans installation.
+- [Choosing permissions for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app) et [Endpoints available for GitHub App user access tokens](https://docs.github.com/en/rest/authentication/endpoints-available-for-github-app-user-access-tokens) : aucune permission par défaut ; `GET /user` disponible.
+- [Best practices for creating a GitHub App](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/best-practices-for-creating-a-github-app) : identifier l’utilisateur par son `id`, Device Flow réservé aux environnements contraints, révocation des jetons.
+- [REST API endpoints for OAuth authorizations](https://docs.github.com/en/rest/apps/oauth-applications?apiVersion=2022-11-28) : révocation d’un grant.
+- [OpenID Connect reference](https://docs.github.com/en/actions/reference/security/oidc) : définition de `actor_id`.
 
 ## Contrat de stockage v4 (mock-only)
 
@@ -36,9 +80,9 @@ Préparer l’inscription de l’approbatrice B désignée le 23 octobre 2026, e
 - **Décidé :** le propriétaire tient seul le rôle d’administrateur SSH ; B est approbatrice uniquement et n’administre pas le registre.
 - **Décidé par le propriétaire le 24 octobre 2026 :** `actor_id` reste obligatoire dans le vérificateur OIDC et son absence entraîne un refus fermé. Sa présence et sa représentation dans un jeton réel restent non vérifiées ; cette décision n’autorise pas l’utilisation d’un jeton réel.
 - Définir et vérifier comment le compte SSH du propriétaire est autorisé à gérer le registre, et comment ces opérations sont journalisées.
-- La lecture et la revue du code public ne nécessitent aucun accès collaborateur. Si le workflow de preuve P-1 doit être lancé par B, déterminer séparément les permissions GitHub requises ; la présente décision ne lui attribue aucun droit d’écriture.
+- **Décidé par le propriétaire le 24 octobre 2026 :** la preuve de contrôle du compte GitHub de B passe par une GitHub App sans permission, non installée, et par le flux Web (voir la section dédiée). B n’a besoin d’aucun accès collaborateur ni droit d’écriture et ne lance aucun workflow. La lecture et la revue du code public ne nécessitent pas non plus d’accès collaborateur.
 - Quelle durée courte pour l’invitation, et par quel canal séparé le secret sera-t-il remis à B ?
-- Quelle action exacte de B confirme la liaison de son compte, et quelle trace l’administrateur conserve-t-il sans prétendre prouver une identité civile ?
+- L’action de B est l’autorisation de la GitHub App, suivie de la confirmation SSH du propriétaire (décision du 24 octobre 2026). La forme exacte de la trace de la preuve et de cette confirmation reste à concevoir, sans prétendre prouver une identité civile.
 - Comment la possession d’un second authentificateur séparé sera-t-elle vérifiée et son usage de secours protégé ?
 - La présence et la forme de actor_id dans un vrai jeton OIDC restent à vérifier séparément ; aucun jeton réel n’est autorisé par la désignation actuelle.
 
@@ -46,7 +90,7 @@ Préparer l’inscription de l’approbatrice B désignée le 23 octobre 2026, e
 
 Le module `approval_service/approval_service/approval_store_v4.py` ajoute une variante fraîche du stockage en schéma 4. Le stockage v3 reste inchangé et refuse les bases v4. Le nouveau module n’effectue aucune migration : `initialize` refuse tout fichier existant, et l’ouverture n’accepte qu’un fichier dont les objets sont exactement ceux du schéma 4 ; une base v3 est donc refusée. Il permet de créer une invitation liée à un `approver_id` et un `principal_id`, d’en consommer le secret une seule fois pour activer ces deux lignes dans la même transaction, de la révoquer ou de marquer les invitations expirées. Seule l’empreinte SHA-256 du secret est conservée. L’appelant fournit l’instant absolu d’expiration ; aucune durée n’est choisie ici.
 
-Ce prototype n’est pas encore une frontière d’administration : ses méthodes ne vérifient pas que leur appelant est le propriétaire et ne doivent pas être exposées à un service ou à une interface. Il n’inscrit aucun compte GitHub, aucune personne vérifiée et aucun credential WebAuthn. L’étape ne résout donc pas D-5. La preuve P-1, les protections GitHub et l’authentification SSH restent à établir ; Provider = CLOSED et NO-GO restent en vigueur.
+Ce prototype n’est pas encore une frontière d’administration : ses méthodes ne vérifient pas que leur appelant est le propriétaire et ne doivent pas être exposées à un service ou à une interface. Il n’inscrit aucun compte GitHub, aucune personne vérifiée et aucun credential WebAuthn. L’étape ne résout donc pas D-5. La preuve de contrôle du compte GitHub de B (choix de conception du 24 octobre 2026, non implémentée), les protections GitHub et l’authentification SSH restent à établir ; Provider = CLOSED et NO-GO restent en vigueur.
 
 **Validation locale après les dernières corrections (24 octobre 2026).** `tests/test_g2_approval_store_v4.py` ajoute 32 tests synthétiques. Ils utilisent uniquement des bases temporaires et des secrets générés par le module testé. Ils vérifient :
 
