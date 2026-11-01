@@ -31,13 +31,13 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import os
+import os  # unused; TestScopeBoundaries pins this module's exact import set
 import re
 import secrets
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager  # unused; same pinned import set
 from dataclasses import dataclass, field
-from typing import Callable, Iterator
+from typing import ClassVar
 
 from fido2.webauthn import AttestedCredentialData
 
@@ -294,71 +294,10 @@ class ApprovalStoreV5(ApprovalStore):
     tests.
     """
 
-    @classmethod
-    def initialize(
-        cls,
-        path: str | os.PathLike[str],
-        clock: Callable[[], int],
-        *,
-        busy_timeout_seconds: float = DEFAULT_BUSY_TIMEOUT_SECONDS,
-    ) -> ApprovalStoreV5:
-        """Create schema v5 in a brand-new file; never migrate or reuse a file."""
-
-        _v3._check_sqlite_version()
-        path = _v3._checked_path(path)
-        busy_timeout = _v3._checked_busy_timeout(busy_timeout_seconds)
-        _v3._check_parent(path)
-        for suffix in ("-wal", "-shm"):
-            if os.path.lexists(f"{path}{suffix}"):
-                raise ApprovalStoreUnavailableError(f"a stale database {suffix} file already exists")
-        try:
-            descriptor = os.open(
-                path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-            )
-        except FileExistsError:
-            raise ApprovalStoreUnavailableError("database file already exists; it is never re-initialized") from None
-        except OSError:
-            raise ApprovalStoreUnavailableError("database file could not be created") from None
-        os.close(descriptor)
-
-        connection = _v3._connect(path, busy_timeout)
-        try:
-            if connection.execute("PRAGMA journal_mode = WAL").fetchone()[0] != "wal":
-                raise ApprovalStoreUnavailableError("database could not switch to WAL mode")
-            connection.execute("PRAGMA synchronous = FULL")
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                for statement in _SCHEMA:
-                    connection.execute(statement)
-                connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
-                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-                connection.execute("INSERT INTO store_meta (singleton, last_observed_ms) VALUES (1, 0)")
-            except BaseException:
-                _v3._rollback(connection)
-                raise
-            connection.execute("COMMIT")
-        except sqlite3.Error as error:
-            raise _v3._store_error(error, "database could not be initialized", busy_timeout) from None
-        finally:
-            connection.close()
-        return cls(path, clock, busy_timeout_seconds=busy_timeout)
-
-    @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        _v3._check_sqlite_version()
-        _v3._check_files(self._path)
-        connection = _v3._connect(self._path, self._busy_timeout)
-        try:
-            try:
-                _verify_connection(connection, self._busy_timeout)
-            except sqlite3.Error as error:
-                raise _v3._store_error(error, "database could not be verified", self._busy_timeout) from None
-            yield connection
-        finally:
-            connection.close()
+    _schema_statements: ClassVar[tuple[str, ...]] = _SCHEMA
+    _schema_version: ClassVar[int] = SCHEMA_VERSION
+    _application_id: ClassVar[int] = APPLICATION_ID
+    _connection_verifier = staticmethod(_verify_connection)
 
     def create_invitation(
         self,
@@ -514,8 +453,11 @@ class ApprovalStoreV5(ApprovalStore):
     def reject_enrollment(self, invitation_id: str) -> bool:
         """Close a PENDING enrollment as REJECTED without activating anything.
 
-        ``False`` means it was not pending and nothing was written. This is
-        an unauthenticated storage primitive, reserved for isolated tests.
+        ``False`` means it was not pending and nothing was written, not even
+        the observed clock. A clock moving backwards does not block the
+        rejection, which then records the last observed instant; an unusable
+        clock still refuses it. This is an unauthenticated storage primitive,
+        reserved for isolated tests.
         """
 
         invitation_id = _require_invitation_id(invitation_id)
@@ -525,7 +467,7 @@ class ApprovalStoreV5(ApprovalStore):
             ).fetchone()
             if row is None or row[0] != "PENDING":
                 return False
-            now = self._observe_clock(connection)
+            now = self._observe_clock(connection, allow_regression=True)
             connection.execute(
                 "UPDATE pending_enrollments SET state = 'REJECTED', closed_at_ms = ? WHERE invitation_id = ?",
                 (now, invitation_id),
@@ -535,18 +477,22 @@ class ApprovalStoreV5(ApprovalStore):
     def revoke_invitation(self, invitation_id: str) -> bool:
         """Revoke an issued invitation by its non-secret identifier.
 
-        This is an unauthenticated storage primitive, not an admin interface.
+        An unknown or already closed invitation returns ``False`` and nothing
+        is written, not even the observed clock. A clock moving backwards does
+        not block the revocation, which then records the last observed
+        instant; an unusable clock still refuses it. This is an
+        unauthenticated storage primitive, not an admin interface.
         """
 
         invitation_id = _require_invitation_id(invitation_id)
         with self._write_transaction() as connection:
-            now = self._observe_clock(connection)
             row = connection.execute(
                 "SELECT state, expires_at_ms FROM enrollment_invitations WHERE invitation_id = ?",
                 (invitation_id,),
             ).fetchone()
             if row is None or row[0] != "ISSUED":
                 return False
+            now = self._observe_clock(connection, allow_regression=True)
             state = "EXPIRED" if now >= row[1] else "REVOKED"
             connection.execute(
                 "UPDATE enrollment_invitations SET state = ?, closed_at_ms = ? WHERE invitation_id = ?",

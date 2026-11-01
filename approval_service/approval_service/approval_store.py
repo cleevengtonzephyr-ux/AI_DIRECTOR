@@ -44,7 +44,7 @@ import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, ClassVar, Iterator, Self
 
 from fido2.webauthn import AttestedCredentialData
 
@@ -654,6 +654,13 @@ class ApprovalStore:
     an approval. The clock returns Unix milliseconds.
     """
 
+    # Extension points of a fresh-file schema. They describe one schema
+    # together: a subclass overrides all four or none.
+    _schema_statements: ClassVar[tuple[str, ...]] = _SCHEMA
+    _schema_version: ClassVar[int] = SCHEMA_VERSION
+    _application_id: ClassVar[int] = APPLICATION_ID
+    _connection_verifier = staticmethod(_verify_connection)
+
     def __init__(
         self,
         path: str | os.PathLike[str],
@@ -677,8 +684,8 @@ class ApprovalStore:
         clock: Callable[[], int],
         *,
         busy_timeout_seconds: float = DEFAULT_BUSY_TIMEOUT_SECONDS,
-    ) -> ApprovalStore:
-        """Create the current schema version in a new private file; never reuse a file."""
+    ) -> Self:
+        """Create this store's schema in a new private file; never migrate or reuse a file."""
 
         _check_sqlite_version()
         path = _checked_path(path)
@@ -705,10 +712,10 @@ class ApprovalStore:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("BEGIN IMMEDIATE")
             try:
-                for statement in _SCHEMA:
+                for statement in cls._schema_statements:
                     connection.execute(statement)
-                connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
-                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                connection.execute(f"PRAGMA application_id = {cls._application_id}")
+                connection.execute(f"PRAGMA user_version = {cls._schema_version}")
                 connection.execute("INSERT INTO store_meta (singleton, last_observed_ms) VALUES (1, 0)")
             except BaseException:
                 _rollback(connection)
@@ -971,7 +978,7 @@ class ApprovalStore:
         connection = _connect(self._path, self._busy_timeout)
         try:
             try:
-                _verify_connection(connection, self._busy_timeout)
+                self._connection_verifier(connection, self._busy_timeout)
             except sqlite3.Error as error:
                 raise _store_error(error, "database could not be verified", self._busy_timeout) from None
             yield connection
