@@ -1159,3 +1159,5 @@ Le job Ubuntu `posix-approval-store` exécutera ce module sous Linux ; il n’a 
 Tant que D-5 n’est pas résolu, aucune consommation d’approbation n’est autorisée.
 
 Aucune migration, aucune interface d’administration, aucun jeton OIDC réel, credential réel, secret, appel Higgsfield, génération ou déploiement n’a été utilisé. `Provider = CLOSED` et `NO-GO` restent en vigueur.
+
+**Renvoi (1er novembre 2026) : administration des inscriptions D-5.** La confirmation et le rejet des inscriptions `PENDING` par le propriétaire sont décrits dans [`g2_d5_admin_enrollment_spec.md`](g2_d5_admin_enrollment_spec.md). Cette spécification est un brouillon non implémenté, qui n’autorise rien. D-5 reste non résolu ; `Provider = CLOSED` et `NO-GO` restent en vigueur.
