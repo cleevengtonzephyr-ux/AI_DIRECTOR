@@ -191,6 +191,10 @@ Résultats après le retrait, sous Windows, Python 3.14.5, avec les dépendances
 
 Aucune confirmation SSH, cérémonie WebAuthn réelle, GitHub App, OAuth, callback public, compte, secret ni Provider n’est ajouté. D-5 reste non résolu ; Provider = CLOSED et NO-GO restent en vigueur.
 
+## Spécification de conception associée
+
+La confirmation et le rejet des inscriptions `PENDING` par le propriétaire sont décrits dans [`g2_d5_admin_enrollment_spec.md`](g2_d5_admin_enrollment_spec.md). Cette spécification est un brouillon non implémenté, qui n’autorise rien. D-5 reste non résolu ; Provider = CLOSED et NO-GO restent en vigueur.
+
 ## Limites
 
 Ce brouillon n’affirme pas que D-5 est satisfait. Il n’autorise aucune inscription réelle ni l’utilisation du compte, du jeton OIDC ou des authentificateurs de B.
