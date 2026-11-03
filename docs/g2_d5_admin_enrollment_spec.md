@@ -2804,6 +2804,27 @@ Cette décision précise la portée de la règle d’ancrage (I.4, J.5) et de «
 | Hyp-11 | Le système de fichiers portant P et D présente un profil à définir [O] | Proposée | Emplacement de D | REL | L’état à la date du relevé | Tout comportement en panne | Aucun |
 | Hyp-12 | À la date du constat, l’environnement, nature du volume comprise, correspond au profil consigné dans le dossier de preuves | Proposée | Aucun choix | REL | L’état à la date du relevé | Que cet état restera inchangé | Aucun |
 
+**Profil d’environnement proposé [R].** Ce profil propose le contenu prévu par Hyp-11 et la référence de Hyp-12. Il énumère les caractéristiques à consigner ; il n’en fixe aucune valeur, ne choisit aucun emplacement de D et n’autorise aucun relevé. Le profil consigné regroupe Env-1 à Env-6 ; la part propre au système de fichiers portant P et D, visée par Hyp-11, est formée d’Env-2 et d’Env-3.
+
+| N° | Caractéristique à consigner | Hypothèses concernées | Preuve possible | Observable depuis le système invité | Ce que la valeur consignée ne prouverait pas |
+|---|---|---|---|---|---|
+| Env-1 | Noyau en cours d’exécution | Hyp-1 à Hyp-10 | REL ; DOC pour son comportement | Oui | Son comportement en panne |
+| Env-2 | Type du système de fichiers portant P et D | Hyp-2 à Hyp-4, Hyp-8, Hyp-9 | REL ; DOC | Oui, une fois l’emplacement de D choisi | Son comportement en panne |
+| Env-3 | Options de montage de ce système de fichiers, dont celles qui déterminent la journalisation et les vidages | Hyp-3, Hyp-4, Hyp-8, Hyp-9 | REL ; DOC | Oui, une fois l’emplacement de D choisi | Leur effet réel sur le périphérique |
+| Env-4 | Nature du volume telle que présentée au système invité | Hyp-8, Hyp-10, Hyp-12 | REL | Oui, pour sa présentation seulement | La nature réelle du stockage de l’hébergeur (Hyp-13 à Hyp-16) |
+| Env-5 | État du cache d’écriture du périphérique tel que vu par le noyau | Hyp-8, Hyp-10 | REL | Oui, comme ce que le noyau en croit | L’état réel du périphérique (Hyp-13) |
+| Env-6 | Type de volume et engagements applicables de l’hébergeur | Hyp-13 à Hyp-16 | DOC : examen selon la décision 18 | Non | Leur exécution effective |
+
+Règles proposées [R] :
+
+- chaque valeur est consignée datée, avec ses empreintes, dans le dossier de preuves (critère 2) ;
+- une valeur observable depuis le système invité n’est consignée que si elle a été relevée ; une simple ressemblance d’offre ou de configuration ne suffit pas (critère 7) ; une caractéristique qui ne peut pas être relevée laisse `non établie` l’hypothèse concernée (critère 10) ;
+- Env-6 relève de la décision 18 : il n’est jamais présenté comme vérifié ;
+- la colonne « Hypothèses concernées » est une base proposée pour les caractéristiques pertinentes du critère 7 ;
+- le profil ne prétend pas être complet : une caractéristique dont l’influence sur une hypothèse viendrait à être établie y est ajoutée, et les preuves concernées sont réexaminées.
+
+Restent [O] : l’adoption de cette liste et sa complétude ; son application au système de fichiers qui portera D, qui dépend de l’emplacement de D ; les valeurs, qui exigent un relevé autorisé séparément ; les caractéristiques pertinentes du critère 7 pour chaque hypothèse.
+
 **Contrôle des changements ultérieurs [O].** Aucune preuve ponctuelle ne démontre que l’environnement restera inchangé (G1 l. 397). Ce point n’est donc pas une hypothèse à vérifier par un relevé. La méthode de ce contrôle, sa fréquence et ses événements déclencheurs restent à décider [O]. Tant qu’ils ne sont pas décidés, le constat de suffisance ne peut pas être prononcé (critère 10).
 
 **Hypothèses relevant de l’hébergeur [H].** Leur désignation ci-dessous est proposée [R]. Elles relèvent de la décision 18 : elles peuvent seulement devenir des limites de confiance explicites et ne sont jamais vérifiées. L’examen d’un engagement n’établit pas son exécution.
