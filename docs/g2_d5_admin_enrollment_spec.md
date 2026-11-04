@@ -2802,7 +2802,7 @@ Cette décision précise la portée de la règle d’ancrage (I.4, J.5) et de «
 | Hyp-9 | Écrire ou perdre la confirmation n’altère pas une D déjà durable | Condition d’O1-B | Représentation de D | DOC : journal du système de fichiers. ISO : rejeu à chaque point, avec comparaison octet par octet | La non-interférence au niveau du système de fichiers, dans ce modèle | Les secteurs déchirés et la couche physique | Hyp-14 |
 | Hyp-10 | Le système invité transmet bien les vidages | Proposée | Aucun choix | DOC : documentation du noyau. REL : cache d’écriture vu par le noyau | Ce que le noyau croit du périphérique | L’état réel du périphérique | Hyp-13 |
 | Hyp-11 | Le système de fichiers portant P et D présente un profil à définir [O] | Proposée | Emplacement de D | REL | L’état à la date du relevé | Tout comportement en panne | Aucun |
-| Hyp-12 | À la date du constat, l’environnement, nature du volume comprise, correspond au profil consigné dans le dossier de preuves | Proposée | Aucun choix | REL | L’état à la date du relevé | Que cet état restera inchangé | Aucun |
+| Hyp-12 | À la date du constat, l’environnement, volume tel que présenté au système invité compris, correspond au profil consigné dans le dossier de preuves pour Env-1 à Env-5 ; Env-6 relève de la décision 18 (critère 4) | Proposée | Emplacement de D | REL | L’état observable à la date du relevé | Que cet état restera inchangé ; la nature et le comportement des couches cachées par l’hébergeur | Hyp-13 à Hyp-16 |
 
 **Profil d’environnement proposé [R].** Ce profil propose le contenu prévu par Hyp-11 et la référence de Hyp-12. Il énumère les caractéristiques à consigner ; il n’en fixe aucune valeur, ne choisit aucun emplacement de D et n’autorise aucun relevé. Le profil consigné regroupe Env-1 à Env-6 ; la part propre au système de fichiers portant P et D, visée par Hyp-11, est formée d’Env-2 et d’Env-3.
 
@@ -2811,7 +2811,7 @@ Cette décision précise la portée de la règle d’ancrage (I.4, J.5) et de «
 | Env-1 | Noyau en cours d’exécution | Hyp-1 à Hyp-10 | REL ; DOC pour son comportement | Oui | Son comportement en panne |
 | Env-2 | Type du système de fichiers portant P et D | Hyp-2 à Hyp-4, Hyp-8, Hyp-9 | REL ; DOC | Oui, une fois l’emplacement de D choisi | Son comportement en panne |
 | Env-3 | Options de montage de ce système de fichiers, dont celles qui déterminent la journalisation et les vidages | Hyp-3, Hyp-4, Hyp-8, Hyp-9 | REL ; DOC | Oui, une fois l’emplacement de D choisi | Leur effet réel sur le périphérique |
-| Env-4 | Nature du volume telle que présentée au système invité | Hyp-8, Hyp-10, Hyp-12 | REL | Oui, pour sa présentation seulement | La nature réelle du stockage de l’hébergeur (Hyp-13 à Hyp-16) |
+| Env-4 | Volume tel qu’il est présenté au système invité : périphérique présenté et propriétés que le noyau en expose, hors cache d’écriture (Env-5) | Hyp-8, Hyp-10, Hyp-12 | REL | Oui, pour ce qui est présenté seulement ; les couches de stockage de l’hébergeur ne le sont pas | La nature et le comportement des couches cachées par l’hébergeur ; la correspondance avec le type de volume examiné pour Env-6 (Hyp-13 à Hyp-16) |
 | Env-5 | État du cache d’écriture du périphérique tel que vu par le noyau | Hyp-8, Hyp-10 | REL | Oui, comme ce que le noyau en croit | L’état réel du périphérique (Hyp-13) |
 | Env-6 | Type de volume et engagements applicables de l’hébergeur | Hyp-13 à Hyp-16 | DOC : examen selon la décision 18 | Non | Leur exécution effective |
 
